@@ -1,0 +1,71 @@
+version: "1.0"
+
+# Default mode used when no explicit mode is requested
+default_mode: "standard"
+
+modes:
+  quick_scan:
+    use_llm: false
+    description: "Rule-based scoring only — no LLM needed. Offline-safe."
+    estimated_seconds: 2
+
+  standard:
+    use_llm: true
+    provider: "claude"
+    model: "claude-haiku-4-5-20251001"
+    max_tokens: 3000
+    temperature: 0.7
+    extended_thinking: false
+    description: "Lightweight LLM for hypothesis + research plan generation."
+    estimated_seconds: 15
+    outputs:
+      - hypothesis
+      - interview_questions
+      - participant_list
+      - data_signals
+      - success_criteria
+
+  deep_research:
+    use_llm: true
+    provider: "claude"
+    model: "claude-sonnet-4-6"
+    max_tokens: 16000
+    temperature: 0.3
+    extended_thinking: true
+    thinking_budget_tokens: 10000
+    description: "Ultrathink activated — extended reasoning, competing hypotheses, counter-arguments."
+    estimated_seconds: 60
+    outputs:
+      - competing_hypotheses
+      - counter_arguments
+      - second_order_effects
+      - interview_questions
+      - participant_list
+      - data_signals
+      - success_criteria
+      - signal_confidence
+
+providers:
+  claude:
+    api_key_env: "ANTHROPIC_API_KEY"
+    base_url: "https://api.anthropic.com"
+  openai:
+    api_key_env: "OPENAI_API_KEY"
+    base_url: "https://api.openai.com/v1"
+    # Override model names for OpenAI
+    model_overrides:
+      standard: "gpt-4o-mini"
+      deep_research: "gpt-4o"
+  ollama:
+    api_key_env: null
+    base_url: "http://localhost:11434"
+    model_overrides:
+      standard: "llama3"
+      deep_research: "llama3"
+
+thresholds:
+  # Score at which deep_research mode auto-unlocks
+  auto_deep_research: 80
+  # Score at which standard mode runs automatically
+  auto_standard: 60
+  # User can override deep research threshold in user_context.yaml

@@ -1,0 +1,2198 @@
+"""
+Product Skout — Supply Chain Idea Evaluator
+Streamlit app: adaptive questions → verdict score → research plan → idea card.
+Run: streamlit run app.py
+"""
+import os
+import sys
+import json
+from pathlib import Path
+from dotenv import load_dotenv
+
+import streamlit as st
+
+# Load .env first so ANTHROPIC_API_KEY is available before any imports
+load_dotenv()
+
+# Resolve paths relative to this file so it runs from any directory
+ROOT = Path(__file__).parent
+sys.path.insert(0, str(ROOT))
+os.chdir(ROOT)
+
+from core.question_engine import QuestionEngine
+from core.scoring_engine import ScoringEngine
+from core.research_planner import ResearchPlanner
+from core.idea_card import IdeaCardGenerator
+from core.user_context_manager import (
+    UserContextManager,
+    ORG_TYPES, ORG_SIZES, REGIONS, DATA_SYSTEMS, DOMAIN_LABELS, METHOD_LABELS,
+)
+from llm.factory import LLMFactory
+
+# ------------------------------------------------------------------ #
+# Page configuration
+# ------------------------------------------------------------------ #
+
+st.set_page_config(
+    page_title="Product Skout · Supply Chain Idea Evaluator",
+    page_icon="🔭",
+    layout="centered",
+    initial_sidebar_state="collapsed",
+)
+
+# ------------------------------------------------------------------ #
+# Custom CSS  (light-mode compatible)
+# ------------------------------------------------------------------ #
+
+st.markdown("""
+<style>
+  /* Global */
+  .block-container { max-width: 760px; padding-top: 1.75rem; }
+  h1, h2, h3 { font-weight: 700; color: #0f172a; }
+
+  /* Score circle */
+  .score-circle {
+    width: 130px; height: 130px; border-radius: 50%;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    margin: 0 auto 1rem auto; font-weight: 800;
+  }
+  .score-number { font-size: 40px; line-height: 1; }
+  .score-label  { font-size: 12px; opacity: 0.70; margin-top: 2px; }
+
+  /* Cards */
+  .skout-card {
+    background: #ffffff; border-radius: 10px;
+    border: 1.5px solid #e2e8f0; padding: 14px 18px;
+    margin-bottom: 10px;
+  }
+  .skout-card.highlight { border-color: #6366f1; background: #f5f3ff; }
+  .skout-card.green  { border-color: #86efac; background: #f0fdf4; }
+  .skout-card.yellow { border-color: #fbbf24; background: #fefce8; }
+  .skout-card.orange { border-color: #fb923c; background: #fff7ed; }
+  .skout-card.red    { border-color: #f87171; background: #fef2f2; }
+
+  /* Dimension bar */
+  .dim-bar-bg { background: #e2e8f0; border-radius: 4px; height: 8px; margin-top: 4px; }
+  .dim-bar    { border-radius: 4px; height: 8px; }
+
+  /* Flag chips */
+  .flag-warning { background: #fff7ed; border-left: 3px solid #fb923c; color: #7c2d12;
+                  padding: 8px 12px; border-radius: 0 8px 8px 0; margin-bottom: 8px; font-size: 13px; }
+  .flag-info    { background: #eff6ff; border-left: 3px solid #60a5fa; color: #1e3a5f;
+                  padding: 8px 12px; border-radius: 0 8px 8px 0; margin-bottom: 8px; font-size: 13px; }
+  .flag-caution { background: #fefce8; border-left: 3px solid #facc15; color: #713f12;
+                  padding: 8px 12px; border-radius: 0 8px 8px 0; margin-bottom: 8px; font-size: 13px; }
+
+  /* Idea card */
+  .idea-card-header {
+    background: linear-gradient(135deg, #6366f1, #8b5cf6);
+    border-radius: 10px 10px 0 0; padding: 18px 20px; color: white;
+  }
+  .idea-card-body  { border: 1.5px solid #6366f1; border-top: none;
+                     border-radius: 0 0 10px 10px; padding: 16px 20px; }
+
+  /* Step indicator */
+  .step-text { font-size: 11px; color: #64748b; font-weight: 700;
+               text-transform: uppercase; letter-spacing: 0.5px; }
+
+  /* Hypothesis box */
+  .hypothesis { background: #f5f3ff; border-left: 3px solid #6366f1; color: #1e1b4b;
+                padding: 12px 14px; border-radius: 0 8px 8px 0;
+                font-style: italic; font-size: 14px; line-height: 1.6; }
+
+  /* Interview Q intent badge */
+  .iq-intent { display: inline-block; font-size: 10px; font-weight: 700;
+               padding: 1px 6px; border-radius: 20px; background: #ede9fe;
+               color: #6d28d9; margin-left: 6px; }
+
+  /* Competing hypothesis cards */
+  .hyp-card { border: 1.5px solid #e2e8f0; border-radius: 10px;
+              padding: 12px 14px; margin-bottom: 8px; background: #ffffff; }
+  .hyp-card.primary { border-color: #6366f1; background: #f5f3ff; }
+  .hyp-conf-high   { color: #15803d; font-weight: 700; font-size: 11px; }
+  .hyp-conf-medium { color: #b45309; font-weight: 700; font-size: 11px; }
+  .hyp-conf-low    { color: #dc2626; font-weight: 700; font-size: 11px; }
+
+  /* Phase badge */
+  .phase-badge {
+    display: inline-block; font-size: 10px; font-weight: 700;
+    padding: 2px 8px; border-radius: 20px;
+  }
+  .phase-0 { background: #f1f5f9; color: #475569; }
+  .phase-1 { background: #ede9fe; color: #5b21b6; }
+  .phase-2 { background: #dbeafe; color: #1d4ed8; }
+  .phase-3 { background: #dcfce7; color: #15803d; }
+
+  /* Similar idea alert */
+  .similar-alert { background: #fefce8; border: 1px solid #fbbf24; color: #713f12;
+                   border-radius: 8px; padding: 10px 14px; font-size: 13px;
+                   margin-bottom: 12px; }
+
+  /* Plan summary card */
+  .plan-summary { background: #f5f3ff; border: 1.5px solid #a5b4fc;
+                  border-radius: 10px; padding: 14px 18px; margin-bottom: 16px; color: #1e1b4b; }
+  .plan-stat { display: inline-block; margin-right: 20px; font-size: 13px; }
+
+  /* Data signal injected badge */
+  .injected-badge { font-size: 10px; font-weight: 700; background: #dbeafe;
+                    color: #1d4ed8; padding: 1px 6px; border-radius: 20px; margin-left: 4px; }
+  .known-badge    { font-size: 10px; font-weight: 700; background: #dcfce7;
+                    color: #15803d; padding: 1px 6px; border-radius: 20px; margin-left: 4px; }
+
+  /* ── Phase 1 additions ── */
+
+  /* Stage-Gate card */
+  .gate-card {
+    border-radius: 10px; padding: 12px 18px; margin-bottom: 10px;
+    display: flex; align-items: center; gap: 12px;
+  }
+  .gate-dot {
+    width: 14px; height: 14px; border-radius: 50%; flex-shrink: 0;
+  }
+  .gate-label { font-size: 15px; font-weight: 700; }
+  .gate-sub   { font-size: 12px; opacity: 0.75; margin-top: 2px; }
+
+  /* JTBD statement box */
+  .jtbd-box {
+    background: #f8fafc; border: 1.5px solid #cbd5e1;
+    border-left: 4px solid #6366f1; border-radius: 0 8px 8px 0;
+    padding: 12px 16px; margin-bottom: 10px; font-size: 14px;
+    line-height: 1.65; color: #1e293b;
+  }
+  .jtbd-label {
+    font-size: 10px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.6px; color: #6366f1; margin-bottom: 6px;
+  }
+
+  /* 3 Horizons badge */
+  .horizon-pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 4px 12px; border-radius: 20px; font-size: 13px;
+    font-weight: 700; margin-right: 8px;
+  }
+  .horizon-desc {
+    font-size: 12px; color: #64748b; margin-top: 4px;
+  }
+
+  /* Benchmark row */
+  .benchmark-row {
+    font-size: 13px; color: #374151; padding: 10px 14px;
+    background: #f1f5f9; border-radius: 8px; margin-bottom: 8px;
+  }
+  .benchmark-pct { font-size: 22px; font-weight: 800; color: #6366f1; }
+
+  /* Cost estimate field */
+  .cost-hint { font-size: 12px; color: #64748b; margin-top: -6px; margin-bottom: 8px; }
+
+  /* Phase 2 — SCOR / WSJF / Opportunity Gap metrics strip */
+  .metrics-strip {
+    display: flex; gap: 10px; flex-wrap: wrap; margin: 12px 0;
+  }
+  .metric-card {
+    flex: 1 1 120px; min-width: 110px;
+    background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px;
+    padding: 10px 12px;
+  }
+  .metric-card-label {
+    font-size: 10px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.5px; color: #64748b; margin-bottom: 4px;
+  }
+  .metric-card-value {
+    font-size: 22px; font-weight: 800; line-height: 1;
+  }
+  .metric-card-sub {
+    font-size: 11px; color: #94a3b8; margin-top: 3px;
+  }
+  .scor-pill {
+    display: inline-flex; align-items: center; gap: 5px;
+    background: #ede9fe; color: #5b21b6;
+    padding: 3px 10px; border-radius: 12px;
+    font-size: 12px; font-weight: 700;
+  }
+</style>
+""", unsafe_allow_html=True)
+
+# ------------------------------------------------------------------ #
+# Session state initialisation
+# ------------------------------------------------------------------ #
+
+STEPS = [
+    "onboarding", "idea_input", "origin", "q1", "q2", "q3", "q4", "q5",
+    "verdict", "research_plan", "findings", "idea_card",
+]
+
+def init_state():
+    defaults = {
+        "step":              "idea_input",
+        "idea_title":        "",
+        "idea_description":  "",
+        "engine":            None,
+        "scorer":            None,
+        "factory":           None,
+        "ucm":               None,
+        "verdict":           None,
+        "research_plan":     None,
+        "research_mode":     "standard",
+        "findings":          ["", "", "", "", ""],
+        "checked_criteria":  [],
+        "proposed_direction": "",
+        "open_questions":    ["", "", ""],
+        "idea_card":         None,
+        "idea_recorded":     False,
+        "cost_estimate":     "",
+    }
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
+
+init_state()
+
+# ------------------------------------------------------------------ #
+# Engine lazy init
+# ------------------------------------------------------------------ #
+
+@st.cache_resource
+def load_engines():
+    engine  = QuestionEngine("config/questions.yaml", "config/user_context.yaml")
+    scorer  = ScoringEngine("config/scoring.yaml", "config/questions.yaml", "config/user_context.yaml")
+    factory = LLMFactory("config/llm_config.yaml")
+    return engine, scorer, factory
+
+@st.cache_resource
+def load_ucm():
+    Path("data").mkdir(exist_ok=True)
+    ucm = UserContextManager(
+        context_path="config/user_context.yaml",
+        ideas_path="data/ideas.json",
+    )
+    ucm.load()
+    return ucm
+
+try:
+    _engine, _scorer, _factory = load_engines()
+    if st.session_state.engine is None:
+        st.session_state.engine  = _engine
+        st.session_state.scorer  = _scorer
+        st.session_state.factory = _factory
+except Exception as e:
+    st.error(f"Failed to load Product Skout config: {e}")
+    st.stop()
+
+try:
+    _ucm = load_ucm()
+    if st.session_state.ucm is None:
+        st.session_state.ucm = _ucm
+except Exception as e:
+    st.warning(f"User context unavailable: {e}")
+
+# ------------------------------------------------------------------ #
+# Navigation helpers
+# ------------------------------------------------------------------ #
+
+def go(step: str):
+    st.session_state.step = step
+    st.rerun()
+
+def prev_step(current: str):
+    idx = STEPS.index(current)
+    if idx > 0:
+        go(STEPS[idx - 1])
+
+def progress_bar(step: str):
+    question_steps = ["origin", "q1", "q2", "q3", "q4", "q5"]
+    if step in question_steps:
+        idx   = question_steps.index(step) + 1
+        total = len(question_steps)
+        st.markdown(f'<p class="step-text">Step {idx} of {total}</p>', unsafe_allow_html=True)
+        st.progress(idx / total)
+
+def safe_radio(label, options_list, index=0, key=None):
+    """
+    Wrapper around st.radio that guarantees a valid (non-None) default.
+    Prevents ValueError: None is not in list on first render.
+    """
+    idx = max(0, index) if index is not None else 0
+    return st.radio(label, options_list, index=idx, key=key, label_visibility="collapsed")
+
+
+# ------------------------------------------------------------------ #
+# Phase 1 Helper Functions
+# ------------------------------------------------------------------ #
+
+# Human-readable label maps (mirrors research_planner.py — kept in sync)
+_Q2_LABELS_APP = {
+    "forecast_accuracy":     "forecast accuracy problems",
+    "inventory_optimization":"inventory overstock / stockout",
+    "sop_process":           "S&OP planning gaps",
+    "demand_sensing":        "demand signal quality",
+    "capacity_planning":     "capacity planning",
+    "supplier_risk":         "supplier risk and visibility gaps",
+    "invoice_reconciliation":"invoice matching and reconciliation",
+    "contract_compliance":   "contract compliance / spend leakage",
+    "po_cycle_time":         "PO approval delays",
+    "tail_spend":            "tail spend / maverick buying",
+    "turnaround_time":       "SLA failures and turnaround delays",
+    "parts_availability":    "parts availability shortfalls",
+    "warranty_claims":       "warranty claim leakage",
+    "cost_per_repair":       "repair cost control",
+    "counterfeit_parts":     "parts authenticity / counterfeit risk",
+    "reverse_logistics":     "reverse logistics inefficiency",
+    "visibility_gaps":       "visibility and data gaps",
+    "cost_leakage":          "uncontrolled cost / leakage",
+    "process_inefficiency":  "process inefficiency and manual work",
+    "compliance_risk":       "compliance and regulatory risk",
+    "other":                 "a custom problem",
+}
+
+_Q3_LABELS_APP = {
+    "sc_planners":       "Supply Chain Planners",
+    "procurement_mgrs":  "Procurement / Category Managers",
+    "operations":        "Operations and Field Teams",
+    "finance":           "Finance and Compliance Teams",
+    "leadership":        "Supply Chain Leadership",
+    "external_partners": "External Partners and Suppliers",
+}
+
+_Q4_CURRENT_STATE_APP = {
+    "manual_spreadsheet": "relying on manual spreadsheet processes",
+    "legacy_erp":         "working around legacy ERP limitations",
+    "siloed_tools":       "juggling multiple disconnected tools",
+    "internal_tool":      "using a homegrown tool that doesn't scale",
+    "competitor_exists":  "using an existing market solution that falls short",
+    "not_handled":        "leaving the problem entirely unaddressed",
+}
+
+_FREQ_LABELS_APP = {
+    "daily":   "daily",
+    "weekly":  "several times a week",
+    "monthly": "weekly or monthly",
+    "rare":    "on occasion",
+}
+
+_SEV_LABELS_APP = {
+    "stops_work":       "halting operations",
+    "major_workaround": "requiring significant workarounds",
+    "slows_down":       "slowing down their work",
+    "minor":            "causing minor friction",
+}
+
+
+def get_jtbd_statement(engine) -> str:
+    """Build a JTBD-style problem statement from current answers."""
+    answers  = engine.answers
+    q2       = answers.get("q2", "")
+    q3       = answers.get("q3", "")
+    q4       = answers.get("q4", "")
+    q5       = answers.get("q5", {}) or {}
+
+    problem       = _Q2_LABELS_APP.get(q2, q2.replace("_", " ") if q2 else "this problem")
+    stakeholder   = _Q3_LABELS_APP.get(q3, "supply chain teams")
+    current_state = _Q4_CURRENT_STATE_APP.get(q4, "existing processes")
+    freq          = _FREQ_LABELS_APP.get(q5.get("frequency", ""), "regularly")
+    severity      = _SEV_LABELS_APP.get(q5.get("severity", ""), "causing disruption")
+
+    return (
+        f"When **{current_state}**, **{stakeholder}** face **{problem}** "
+        f"{freq}, {severity}. "
+        f"A solution would let them focus on higher-value work instead of managing this gap."
+    )
+
+
+# H1 problem types where the domain signals core improvement work
+_H1_PROBLEM_TYPES = {
+    "forecast_accuracy", "sop_process", "po_cycle_time",
+    "turnaround_time", "cost_per_repair", "invoice_reconciliation",
+    "process_inefficiency",
+}
+
+def get_horizon(band: str, q4: str, q2: str) -> tuple:
+    """
+    Returns (horizon_code, horizon_label, bg_color, text_color, description).
+    McKinsey 3 Horizons classification based on market gap + problem type.
+    """
+    if q4 == "not_handled":
+        return (
+            "H3", "Transformational Bet",
+            "#ede9fe", "#5b21b6",
+            "No existing solution exists — requires deep discovery before any investment.",
+        )
+    if q4 in ("siloed_tools", "competitor_exists"):
+        return (
+            "H2", "Adjacent Opportunity",
+            "#dbeafe", "#1d4ed8",
+            "Market exists but is underserved — differentiation and positioning are critical.",
+        )
+    if q2 in ("demand_sensing", "compliance_risk", "visibility_gaps", "counterfeit_parts"):
+        return (
+            "H2", "Adjacent Opportunity",
+            "#dbeafe", "#1d4ed8",
+            "Emerging problem space — early mover advantage if validated quickly.",
+        )
+    # Default: H1
+    return (
+        "H1", "Core Improvement",
+        "#dcfce7", "#15803d",
+        "Improving known workflows — lower risk; focus on ROI and clear differentiation.",
+    )
+
+
+def get_benchmark(ucm, domain: str, current_score: float):
+    """
+    Returns benchmark dict or None.
+    Requires ≥2 historical scores to display.
+    """
+    if not ucm or ucm.get_phase() < 1:
+        return None
+    history = ucm.get_ideas_history()
+    if not history:
+        return None
+
+    domain_scores = [i["score"] for i in history if i.get("domain") == domain and "score" in i]
+    if len(domain_scores) >= 2:
+        pct = int(sum(1 for s in domain_scores if s < current_score) / len(domain_scores) * 100)
+        return {"percentile": pct, "count": len(domain_scores), "scope": domain.capitalize()}
+
+    all_scores = [i["score"] for i in history if "score" in i]
+    if len(all_scores) >= 2:
+        pct = int(sum(1 for s in all_scores if s < current_score) / len(all_scores) * 100)
+        return {"percentile": pct, "count": len(all_scores), "scope": "all domains"}
+
+    return None
+
+
+# Stage-Gate verdict mapping (Gate 1 framing)
+_GATE_RECOMMENDATIONS = {
+    "high_priority": ("🟢 Gate 1: Proceed to Scoping",          "#f0fdf4", "#15803d", "#86efac"),
+    "promising":     ("🟡 Gate 1: Proceed with Validation",      "#fefce8", "#b45309", "#fbbf24"),
+    "needs_clarity": ("🟠 Gate 1: Return to Discovery",          "#fff7ed", "#c2410c", "#fb923c"),
+    "not_ready":     ("🔴 Gate 1: Shelve — Insufficient Signal", "#fef2f2", "#b91c1c", "#f87171"),
+}
+
+
+# ------------------------------------------------------------------ #
+# SCREEN: Onboarding Wizard
+# ------------------------------------------------------------------ #
+
+def screen_onboarding():
+    st.markdown("# 🔭 Welcome to Product Skout")
+    st.markdown(
+        "Product Skout learns your context over time — your organisation, domains, and preferred "
+        "research methods — to personalise every evaluation. This takes about 60 seconds."
+    )
+    st.divider()
+
+    with st.form("onboarding_form"):
+        st.markdown("### 👤 About You")
+        col1, col2 = st.columns(2)
+        with col1:
+            name = st.text_input("Your name", placeholder="e.g. Avinash")
+        with col2:
+            role = st.text_input("Your role", placeholder="e.g. Senior Product Manager")
+
+        st.markdown("### 🏢 Your Organisation")
+        col3, col4 = st.columns(2)
+        with col3:
+            org_name = st.text_input("Organisation name", placeholder="e.g. Acme Supply Co.")
+            org_type = st.selectbox("Organisation type", ORG_TYPES)
+        with col4:
+            org_size = st.selectbox("Organisation size", ORG_SIZES)
+            regions  = st.multiselect("Regions you operate in", REGIONS)
+
+        st.markdown("### 🎯 Your Focus Areas")
+        domain_options = list(DOMAIN_LABELS.items())
+        domain_labels  = [v for _, v in domain_options]
+        domain_ids     = [k for k, _ in domain_options]
+        primary_labels = st.multiselect(
+            "Primary supply chain domains (select 1–3)",
+            domain_labels, max_selections=3,
+        )
+        primary_domains = [domain_ids[domain_labels.index(l)] for l in primary_labels]
+
+        st.markdown("### 🗄️ Connected Data Systems")
+        data_sources = st.multiselect(
+            "Which systems does your team use?",
+            DATA_SYSTEMS,
+            help="These will appear as pre-populated data signals in your research plans.",
+        )
+
+        st.markdown("### ⚙️ Research Preferences")
+        col5, col6 = st.columns(2)
+        with col5:
+            interview_count = st.slider("Default interview target", 3, 15, 5)
+        with col6:
+            deep_think_threshold = st.slider(
+                "Deep Research threshold", 60, 100, 80, step=5,
+                help="Ideas scoring above this unlock Deep Research automatically.",
+            )
+
+        st.divider()
+        submitted = st.form_submit_button(
+            "Save Profile & Start Evaluating →", type="primary", use_container_width=True
+        )
+
+    if submitted:
+        if not name.strip() or not role.strip():
+            st.error("Please enter your name and role to continue.")
+        else:
+            ucm = st.session_state.get("ucm")
+            if ucm:
+                ucm.apply_onboarding({
+                    "name": name.strip(), "role": role.strip(),
+                    "org_name": org_name.strip(), "org_type": org_type,
+                    "org_size": org_size, "regions": regions,
+                    "primary_domains": primary_domains,
+                    "data_sources": data_sources,
+                    "interview_count": interview_count,
+                    "deep_think_threshold": deep_think_threshold,
+                })
+            st.success(f"Profile saved! Welcome, {name}.")
+            go("idea_input")
+
+    st.markdown("---")
+    if st.button("Skip for now →"):
+        ucm = st.session_state.get("ucm")
+        if ucm:
+            ucm.apply_onboarding({"name": "User", "role": "PM"})
+        go("idea_input")
+
+# ------------------------------------------------------------------ #
+# SCREEN: Idea Input
+# ------------------------------------------------------------------ #
+
+def screen_idea_input():
+    ucm = st.session_state.get("ucm")
+    if ucm and not ucm.is_onboarded():
+        go("onboarding")
+        return
+
+    st.markdown("# 🔭 Product Skout")
+    st.markdown(
+        "**Supply Chain Idea Evaluator** — 5 adaptive questions, a verdict score, "
+        "and a research plan. Know whether your idea is worth pursuing before writing a line of spec."
+    )
+
+    if ucm:
+        phase = ucm.get_phase()
+        phase_colors = {0: "phase-0", 1: "phase-1", 2: "phase-2", 3: "phase-3"}
+        st.markdown(
+            f'<span class="phase-badge {phase_colors[phase]}">{ucm.phase_label()}</span>',
+            unsafe_allow_html=True,
+        )
+
+    st.divider()
+
+    st.session_state.idea_title = st.text_input(
+        "Give your idea a name",
+        value=st.session_state.idea_title,
+        placeholder="e.g. Automated Invoice Reconciliation for Procurement",
+    )
+    st.session_state.idea_description = st.text_area(
+        "Describe it in 1–2 sentences",
+        value=st.session_state.idea_description,
+        placeholder="e.g. A tool that automatically matches supplier invoices to POs and routes exceptions — replacing a manual process that takes 12+ hrs/week.",
+        height=85,
+    )
+
+    col1, col2 = st.columns([3, 1])
+    with col2:
+        if st.button("Start Evaluation →", type="primary", use_container_width=True):
+            if not st.session_state.idea_title.strip():
+                st.error("Give your idea a name to get started.")
+            else:
+                st.session_state.engine.reset()
+                st.session_state.idea_recorded = False
+                go("origin")
+
+# ------------------------------------------------------------------ #
+# SCREEN: Origin Pre-Question
+# ------------------------------------------------------------------ #
+
+def screen_origin():
+    progress_bar("origin")
+    st.markdown("### Before we evaluate — where did this idea come from?")
+    st.caption("This shapes how much weight we give the signal behind your idea.")
+
+    engine  = st.session_state.engine
+    pq      = engine.get_pre_question()
+    options = pq["options"]
+    labels  = [f"{o['icon']}  {o['label']}" for o in options]
+
+    current = engine.answers.get("origin")
+    index   = 0
+    if current:
+        ids = [o["id"] for o in options]
+        if current in ids:
+            index = ids.index(current)
+
+    chosen_label = safe_radio("Source", labels, index=index)
+    chosen       = options[labels.index(chosen_label)]
+
+    mult = chosen.get("multiplier", 1.0)
+    if mult > 1.0:
+        st.success(f"✓ User-validated signal — score multiplier **×{mult}** applied")
+    elif mult == 1.0:
+        st.info("Baseline signal — score unmodified. Consider validating with users.")
+    else:
+        st.warning(f"Low external validation — multiplier **×{mult}** reduces final score")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("← Back", use_container_width=True):
+            prev_step("origin")
+    with col2:
+        if st.button("Next →", type="primary", use_container_width=True):
+            engine.record_answer("origin", chosen["id"])
+            go("q1")
+
+# ------------------------------------------------------------------ #
+# SCREEN: Q1 — Domain
+# ------------------------------------------------------------------ #
+
+def screen_q1():
+    progress_bar("q1")
+    engine  = st.session_state.engine
+    ucm     = st.session_state.get("ucm")
+    q       = engine.get_question("q1")
+
+    st.markdown(f"### Q1. {q['text']}")
+    st.caption(q.get("help", ""))
+
+    options   = engine.get_options("q1")   # hidden options already filtered
+    current   = engine.answers.get("q1")
+    suggested = ucm.get_suggested_domain() if ucm else None
+
+    labels = [f"{o.get('icon','')}  {o['label']}" for o in options]
+
+    index = 0
+    if current:
+        ids = [o["id"] for o in options]
+        if current in ids:
+            index = ids.index(current)
+    elif suggested:
+        ids = [o["id"] for o in options]
+        if suggested in ids:
+            index = ids.index(suggested)
+
+    if suggested and not current:
+        st.info(f"💡 Pre-filled from your most-evaluated domain: **{DOMAIN_LABELS.get(suggested, suggested)}**. Change freely.")
+
+    chosen_label = safe_radio("Domain", labels, index=index)
+    chosen       = options[labels.index(chosen_label)]
+
+    if chosen.get("description"):
+        st.caption(f"*{chosen['description']}*")
+
+    # Similar ideas notice (Phase 1+ only, only when there are actual prior ideas)
+    if ucm and ucm.get_phase() >= 1:
+        similar = ucm.find_similar_ideas(chosen["id"], "")
+        if similar:
+            st.markdown(
+                f'<div class="similar-alert">📂 You\'ve evaluated <strong>{len(similar)} previous '
+                f'idea(s)</strong> in this domain — check the sidebar for details.</div>',
+                unsafe_allow_html=True,
+            )
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("← Back", use_container_width=True):
+            prev_step("q1")
+    with col2:
+        if st.button("Next →", type="primary", use_container_width=True):
+            engine.record_answer("q1", chosen["id"])
+            go("q2")
+
+# ------------------------------------------------------------------ #
+# SCREEN: Q2 — Problem (adaptive on Q1 domain)
+# ------------------------------------------------------------------ #
+
+def screen_q2():
+    progress_bar("q2")
+    engine       = st.session_state.engine
+    q            = engine.get_question("q2")
+    domain_label = engine.get_label("q1", engine.answers.get("q1", ""))
+
+    st.markdown(f"### Q2. {q['text']}")
+    st.caption(f"Domain: **{domain_label}** — options tailored to this domain")
+
+    options = engine.get_options("q2")
+    current = engine.answers.get("q2")
+    labels  = [f"{o.get('icon','')}  {o['label']}" for o in options]
+
+    index = 0
+    if current:
+        ids = [o["id"] for o in options]
+        if current in ids:
+            index = ids.index(current)
+
+    chosen_label = safe_radio("Problem", labels, index=index)
+    chosen       = options[labels.index(chosen_label)]
+
+    free_text = None
+    if chosen["id"] == "other":
+        free_text = st.text_area(
+            "Describe the problem:", height=70,
+            value=engine.answers.get("q2_text", ""),
+        )
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("← Back", use_container_width=True):
+            prev_step("q2")
+    with col2:
+        if st.button("Next →", type="primary", use_container_width=True):
+            engine.record_answer("q2", chosen["id"], free_text)
+            go("q3")
+
+# ------------------------------------------------------------------ #
+# SCREEN: Q3 — Stakeholder (auto-ordered by domain)
+# ------------------------------------------------------------------ #
+
+def screen_q3():
+    progress_bar("q3")
+    engine = st.session_state.engine
+    q      = engine.get_question("q3")
+
+    st.markdown(f"### Q3. {q['text']}")
+    st.caption(q.get("help", ""))
+
+    options = engine.get_options("q3")   # domain-ordered
+    current = engine.answers.get("q3")
+    labels  = [f"{o.get('icon','')}  {o['label']}" for o in options]
+
+    index = 0
+    if current:
+        ids = [o["id"] for o in options]
+        if current in ids:
+            index = ids.index(current)
+
+    chosen_label = safe_radio("Stakeholder", labels, index=index)
+    chosen       = options[labels.index(chosen_label)]
+
+    if chosen.get("description"):
+        st.caption(f"*{chosen['description']}*")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("← Back", use_container_width=True):
+            prev_step("q3")
+    with col2:
+        if st.button("Next →", type="primary", use_container_width=True):
+            engine.record_answer("q3", chosen["id"])
+            go("q4")
+
+# ------------------------------------------------------------------ #
+# SCREEN: Q4 — Current State
+# ------------------------------------------------------------------ #
+
+def screen_q4():
+    progress_bar("q4")
+    engine = st.session_state.engine
+    q      = engine.get_question("q4")
+
+    st.markdown(f"### Q4. {q['text']}")
+    st.caption(q.get("help", ""))
+
+    options = engine.get_options("q4")
+    current = engine.answers.get("q4")
+    labels  = [f"{o.get('icon','')}  {o['label']}" for o in options]
+
+    index = 0
+    if current:
+        ids = [o["id"] for o in options]
+        if current in ids:
+            index = ids.index(current)
+
+    chosen_label = safe_radio("Current State", labels, index=index)
+    chosen       = options[labels.index(chosen_label)]
+
+    if chosen.get("description"):
+        st.caption(f"*{chosen['description']}*")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("← Back", use_container_width=True):
+            prev_step("q4")
+    with col2:
+        if st.button("Next →", type="primary", use_container_width=True):
+            engine.record_answer("q4", chosen["id"])
+            go("q5")
+
+# ------------------------------------------------------------------ #
+# SCREEN: Q5 — Three-factor impact
+# ------------------------------------------------------------------ #
+
+def screen_q5():
+    progress_bar("q5")
+    engine  = st.session_state.engine
+    q       = engine.get_question("q5")
+
+    st.markdown(f"### Q5. {q['text']}")
+    st.caption(q.get("help", ""))
+
+    q5_saved      = engine.answers.get("q5", {}) or {}
+    factors       = q.get("factors", [])
+    factor_answers = {}
+
+    for factor in factors:
+        st.markdown(f"**{factor['icon']} {factor['question']}**")
+        opts   = factor["options"]
+        labels = [o["label"] for o in opts]
+        saved  = q5_saved.get(factor["id"])
+        index  = 0
+        if saved:
+            ids = [o["id"] for o in opts]
+            if saved in ids:
+                index = ids.index(saved)
+
+        chosen_label              = safe_radio(factor["id"], labels, index=index, key=f"q5_{factor['id']}")
+        chosen_opt                = opts[labels.index(chosen_label)]
+        factor_answers[factor["id"]] = chosen_opt["id"]
+        st.markdown("")
+
+    # ── Optional cost quantification (Phase 1) ──
+    st.markdown("---")
+    st.markdown("**💰 Estimated cost of this problem** *(optional — used in Research Plan)*")
+    st.markdown(
+        '<p class="cost-hint">e.g. "~$200K/yr in manual labour", "3 FTE hours per shipment", '
+        '"15% margin leakage on tail spend". Leave blank if unknown.</p>',
+        unsafe_allow_html=True,
+    )
+    cost_val = st.text_input(
+        "Cost estimate",
+        value=st.session_state.get("cost_estimate", ""),
+        placeholder="e.g. ~$150K/year in overtime and rework",
+        key="cost_estimate_input",
+        label_visibility="collapsed",
+    )
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("← Back", use_container_width=True):
+            prev_step("q5")
+    with col2:
+        if st.button("Get Verdict →", type="primary", use_container_width=True):
+            st.session_state.cost_estimate = cost_val
+            engine.record_q5(
+                factor_answers.get("frequency", ""),
+                factor_answers.get("severity", ""),
+                factor_answers.get("workaround_effort", ""),
+            )
+            verdict = st.session_state.scorer.compute(
+                engine.answers,
+                engine.get_origin_multiplier(),
+                engine.is_wip_domain(),
+            )
+            st.session_state.verdict      = verdict
+            st.session_state.idea_recorded = False
+            go("verdict")
+
+# ------------------------------------------------------------------ #
+# SCREEN: Verdict
+# ------------------------------------------------------------------ #
+
+def screen_verdict():
+    verdict = st.session_state.verdict
+    if not verdict:
+        go("idea_input")
+        return
+
+    # UCM: record once on first arrival at verdict
+    ucm = st.session_state.get("ucm")
+    if ucm and not st.session_state.get("idea_recorded", False):
+        domain = st.session_state.engine.answers.get("q1", "")
+        ucm.record_idea_submitted(
+            domain=domain,
+            idea_title=st.session_state.idea_title,
+            score=verdict.final_score,
+            deep_dive=verdict.deep_dive_unlocked,
+        )
+        st.session_state.idea_recorded = True
+        for notif in ucm.get_unlock_notifications():
+            st.toast(notif, icon="🔓")
+
+    color = verdict.band_color
+
+    st.markdown(
+        f"""<div class="score-circle" style="background:{color}18;border:3px solid {color}">
+            <span class="score-number" style="color:{color}">{verdict.percent}</span>
+            <span class="score-label" style="color:{color}">/ 100</span>
+        </div>""",
+        unsafe_allow_html=True,
+    )
+
+    band_class = {"high_priority": "green", "promising": "highlight",
+                  "needs_clarity": "yellow", "not_ready": "red"}.get(verdict.band, "")
+    st.markdown(
+        f"""<div class="skout-card {band_class}">
+            <div style="font-size:22px;margin-bottom:4px">{verdict.band_emoji}</div>
+            <div style="font-size:18px;font-weight:700;color:#0f172a">{verdict.headline}</div>
+            <div style="font-size:14px;margin-top:6px;color:#374151">{verdict.message}</div>
+        </div>""",
+        unsafe_allow_html=True,
+    )
+
+    # ── Stage-Gate Card (Phase 1) ──
+    gate_text, gate_bg, gate_text_color, gate_border = _GATE_RECOMMENDATIONS.get(
+        verdict.band,
+        ("⚪ Gate 1: Evaluate Further", "#f8fafc", "#374151", "#cbd5e1"),
+    )
+    st.markdown(
+        f"""<div class="gate-card" style="background:{gate_bg};border:1.5px solid {gate_border}">
+            <div class="gate-dot" style="background:{gate_text_color}"></div>
+            <div>
+              <div class="gate-label" style="color:{gate_text_color}">{gate_text}</div>
+              <div class="gate-sub" style="color:{gate_text_color}">Stage-Gate Model · Gate 1: Idea Screen</div>
+            </div>
+        </div>""",
+        unsafe_allow_html=True,
+    )
+
+    # Score breakdown — expanded by default
+    with st.expander("📊 Score breakdown", expanded=True):
+        dim_labels = {
+            "business_impact":   "Business Impact (Q5)",
+            "problem_clarity":   "Problem Clarity (Q2)",
+            "market_gap":        "Market Gap (Q4)",
+            "stakeholder_reach": "Stakeholder Reach (Q3)",
+            "domain_fit":        "Domain Fit (Q1)",
+        }
+        dim_colors = {
+            "business_impact":   "#f59e0b",
+            "problem_clarity":   "#8b5cf6",
+            "market_gap":        "#06b6d4",
+            "stakeholder_reach": "#10b981",
+            "domain_fit":        "#6366f1",
+        }
+        for dim, score in verdict.dimension_scores.items():
+            max_pts   = verdict.dimension_max.get(dim, 30)
+            pct       = int((score / max_pts) * 100) if max_pts else 0
+            label     = dim_labels.get(dim, dim)
+            col_color = dim_colors.get(dim, "#6366f1")
+            st.markdown(
+                f"""<div style="margin-bottom:10px">
+                    <div style="display:flex;justify-content:space-between;font-size:13px;color:#0f172a">
+                        <span>{label}</span>
+                        <span style="font-weight:700">{score:.0f}/{max_pts}</span>
+                    </div>
+                    <div class="dim-bar-bg">
+                        <div class="dim-bar" style="width:{pct}%;background:{col_color}"></div>
+                    </div>
+                </div>""",
+                unsafe_allow_html=True,
+            )
+        st.markdown(
+            f"**Origin multiplier:** ×{verdict.origin_multiplier} &nbsp;|&nbsp; "
+            f"**Base:** {verdict.base_score:.1f} → **Final:** {verdict.final_score:.1f}"
+        )
+
+    for flag in verdict.confidence_flags:
+        ftype = flag.get("type", "info")
+        css   = {"warning": "flag-warning", "info": "flag-info", "caution": "flag-caution"}.get(ftype, "flag-info")
+        st.markdown(f'<div class="{css}">{flag["message"]}</div>', unsafe_allow_html=True)
+
+    if verdict.next_steps:
+        st.markdown("**Suggested next steps:**")
+        for ns in verdict.next_steps:
+            st.markdown(f"- {ns}")
+
+    # ── JTBD Problem Statement (Phase 1) ──
+    engine = st.session_state.engine
+    if engine and engine.answers.get("q2"):
+        jtbd = get_jtbd_statement(engine)
+        st.markdown(
+            f'<div class="jtbd-box">'
+            f'<div class="jtbd-label">📌 JTBD Problem Statement</div>'
+            f'{jtbd}'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+    # ── 3 Horizons Classification + Benchmark (Phase 1) ──
+    q2 = engine.answers.get("q2", "") if engine else ""
+    q4 = engine.answers.get("q4", "") if engine else ""
+    if q2 or q4:
+        h_code, h_label, h_bg, h_text_color, h_desc = get_horizon(verdict.band, q4, q2)
+
+        col_h, col_b = st.columns([3, 2])
+        with col_h:
+            st.markdown(
+                f'<div style="margin-bottom:6px">'
+                f'<span style="font-size:11px;font-weight:700;color:#64748b;'
+                f'text-transform:uppercase;letter-spacing:0.5px">McKinsey 3 Horizons</span>'
+                f'</div>'
+                f'<span class="horizon-pill" style="background:{h_bg};color:{h_text_color}">'
+                f'{h_code} · {h_label}</span>'
+                f'<div class="horizon-desc">{h_desc}</div>',
+                unsafe_allow_html=True,
+            )
+
+        with col_b:
+            ucm = st.session_state.get("ucm")
+            domain = engine.answers.get("q1", "") if engine else ""
+            bm = get_benchmark(ucm, domain, verdict.final_score)
+            if bm:
+                st.markdown(
+                    f'<div class="benchmark-row">'
+                    f'<div style="font-size:11px;font-weight:700;color:#64748b;'
+                    f'text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">'
+                    f'Your Benchmark</div>'
+                    f'<span class="benchmark-pct">{bm["percentile"]}th</span>'
+                    f'<span style="font-size:12px;color:#6b7280"> percentile</span>'
+                    f'<div style="font-size:11px;color:#94a3b8;margin-top:2px">'
+                    f'vs {bm["count"]} ideas · {bm["scope"]}</div>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.markdown(
+                    '<div class="benchmark-row" style="color:#94a3b8">'
+                    '<div style="font-size:11px;font-weight:700;text-transform:uppercase;'
+                    'letter-spacing:0.5px;margin-bottom:4px">Benchmark</div>'
+                    'Submit 2+ ideas to see percentile ranking.'
+                    '</div>',
+                    unsafe_allow_html=True,
+                )
+
+    # ── Cost estimate summary (if provided) ──
+    cost_est = st.session_state.get("cost_estimate", "").strip()
+    if cost_est:
+        st.markdown(
+            f'<div style="background:#fefce8;border:1px solid #fbbf24;border-radius:8px;'
+            f'padding:10px 14px;font-size:13px;color:#713f12;margin-top:8px">'
+            f'<strong>💰 Estimated cost impact:</strong> {cost_est}'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+    # ── Phase 2 — SCOR / WSJF / Opportunity Gap metrics strip ──
+    with st.expander("📐 Framework Metrics", expanded=False):
+        _scor  = verdict.scor_category
+        _wsjf  = verdict.wsjf_score
+        _opp   = verdict.opportunity_gap
+
+        # SCOR alignment
+        st.markdown(
+            f'<div style="margin-bottom:10px">'
+            f'<div style="font-size:11px;font-weight:700;color:#64748b;'
+            f'text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px">SCOR Framework Alignment</div>'
+            f'<span class="scor-pill">{verdict.scor_icon} {_scor}</span>'
+            f'<div style="font-size:12px;color:#64748b;margin-top:5px">{verdict.scor_description}</div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+        wsjf_color  = "#16a34a" if _wsjf >= 7 else ("#ca8a04" if _wsjf >= 4 else "#64748b")
+        opp_color   = "#16a34a" if _opp  >= 14 else ("#ca8a04" if _opp  >= 8  else "#64748b")
+        wsjf_band   = "High urgency" if _wsjf >= 7 else ("Moderate" if _wsjf >= 4 else "Low urgency")
+        opp_band    = "Underserved" if _opp >= 14 else ("Moderate gap" if _opp >= 8 else "Well-served")
+
+        st.markdown(
+            f'<div class="metrics-strip">'
+            f'<div class="metric-card">'
+            f'<div class="metric-card-label">WSJF Urgency</div>'
+            f'<div class="metric-card-value" style="color:{wsjf_color}">{_wsjf:.1f}'
+            f'<span style="font-size:13px;color:#94a3b8"> /10</span></div>'
+            f'<div class="metric-card-sub">{wsjf_band}</div>'
+            f'</div>'
+            f'<div class="metric-card">'
+            f'<div class="metric-card-label">Opportunity Gap</div>'
+            f'<div class="metric-card-value" style="color:{opp_color}">{_opp:.1f}'
+            f'<span style="font-size:13px;color:#94a3b8"> /20</span></div>'
+            f'<div class="metric-card-sub">{opp_band}</div>'
+            f'</div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+        st.caption(
+            "**WSJF** (Weighted Shortest Job First) = Cost of Delay ÷ Duration proxy — "
+            "higher scores mean the delay cost outweighs the build effort. "
+            "**Opportunity Gap** (Ulwick ODI) = Importance + max(Importance − Satisfaction, 0) — "
+            "scores ≥14 indicate an underserved problem worth prioritising."
+        )
+
+    st.divider()
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("← Reevaluate", use_container_width=True):
+            st.session_state.engine.reset()
+            go("idea_input")
+    with col2:
+        if verdict.deep_dive_unlocked:
+            if st.button("🔬 Open Research Plan →", type="primary", use_container_width=True):
+                go("research_plan")
+        else:
+            st.info(f"Score {verdict.deep_think_threshold}+ unlocks the Research Plan. Your score: {verdict.percent}.")
+
+# ------------------------------------------------------------------ #
+# SCREEN: Research Plan  (tabbed layout)
+# ------------------------------------------------------------------ #
+
+def screen_research_plan():
+    verdict = st.session_state.verdict
+    engine  = st.session_state.engine
+    ucm     = st.session_state.get("ucm")
+
+    st.markdown("## 🔬 Research Plan")
+    st.markdown(f"**{st.session_state.idea_title}** · {verdict.band_emoji} {verdict.percent}/100")
+    st.divider()
+
+    # Mode selector
+    factory   = st.session_state.factory
+    provider  = factory.get_provider()
+    from llm.factory import RuleBasedProvider
+    is_rule_based = isinstance(provider, RuleBasedProvider)
+
+    if is_rule_based:
+        st.info("ℹ️ No API key detected — running in rule-based mode. Set `ANTHROPIC_API_KEY` in your `.env` to enable LLM enrichment.")
+        mode = "quick_scan"
+    else:
+        mode_choice = st.radio(
+            "Research depth:",
+            ["🤖 Standard (Haiku, ~15s)", "🧠 Deep Research (Sonnet + extended thinking, ~60s)"],
+            horizontal=True,
+        )
+        mode = "deep_research" if "Deep" in mode_choice else "standard"
+        if mode == "deep_research":
+            st.info("🧠 Generates 3 competing hypotheses, counter-arguments, and second-order effects.")
+
+    regen = st.button("🔄 Regenerate", use_container_width=False)
+    if st.session_state.research_plan is None or regen:
+        with st.spinner("Product Skout is thinking…" if mode == "deep_research" else "Generating plan…"):
+            planner = ResearchPlanner(provider=provider)
+            plan = planner.generate(
+                answers=engine.answers,
+                verdict=verdict,
+                idea_title=st.session_state.idea_title,
+                idea_description=st.session_state.idea_description,
+                mode=mode,
+                cost_estimate=st.session_state.get("cost_estimate", ""),
+            )
+            if ucm:
+                plan = ucm.inject_into_plan(plan)
+                methods_used = [m.get("method", "") for m in plan.get("research_methods", []) if m.get("method")]
+                if methods_used:
+                    ucm.record_research_completed(methods_used)
+            st.session_state.research_plan = plan
+            st.session_state.research_mode = mode
+
+    plan = st.session_state.research_plan
+    if not plan:
+        st.error("Could not generate research plan.")
+        return
+
+    # ---- Plan-at-a-glance summary card ----
+    n_qs  = len(plan.get("interview_questions", []))
+    n_pax = len(plan.get("participants", []))
+    n_sig = len(plan.get("data_signals", []))
+    n_cri = len(plan.get("success_criteria", []))
+    hyp_preview = (plan.get("hypothesis") or "")[:120]
+    if len(plan.get("hypothesis", "")) > 120:
+        hyp_preview += "…"
+
+    source = plan.get("source", "")
+    source_badge = ("🧠 Deep Research" if source.startswith("llm_deep")
+                    else ("🤖 LLM-enriched" if source.startswith("llm")
+                    else "📋 Rule-based"))
+
+    if ucm:
+        org = ucm.get_org_context()
+        org_note = f" · {org.get('type','')} · {org.get('size','')}" if org.get("type") else ""
+    else:
+        org_note = ""
+
+    cost_est_display = plan.get("cost_estimate", "").strip()
+    cost_html = (
+        f"<div style='font-size:12px;color:#713f12;margin-top:6px'>"
+        f"💰 <strong>Cost estimate:</strong> {cost_est_display}</div>"
+        if cost_est_display else ""
+    )
+
+    st.markdown(
+        f"""<div class="plan-summary">
+          <div style="font-size:11px;font-weight:700;color:#4c1d95;text-transform:uppercase;margin-bottom:8px">
+            {source_badge}{org_note}
+          </div>
+          <div style="margin-bottom:8px">
+            <span class="plan-stat">❓ {n_qs} interview questions</span>
+            <span class="plan-stat">👥 {n_pax} participant type(s)</span>
+            <span class="plan-stat">📊 {n_sig} data signals</span>
+            <span class="plan-stat">✅ {n_cri} success criteria</span>
+          </div>
+          {"<div style='font-size:12px;color:#3730a3;font-style:italic'>" + hyp_preview + "</div>" if hyp_preview else ""}
+          {cost_html}
+        </div>""",
+        unsafe_allow_html=True,
+    )
+
+    # Quick-proceed option
+    col_skip1, col_skip2 = st.columns([2, 1])
+    with col_skip2:
+        if st.button("⏭️ Skip to Findings →", use_container_width=True):
+            go("findings")
+
+    st.markdown("")
+
+    # ---- Tabbed content ----
+    tab_overview, tab_interviews, tab_data, tab_methods = st.tabs([
+        "📋 Overview", "👥 Interviews", "📊 Data & Evidence", "🗓️ Methods"
+    ])
+
+    # ── Tab 1: Overview ──────────────────────────────────────────────
+    with tab_overview:
+        if plan.get("competing_hypotheses"):
+            st.markdown("#### 🔀 Competing Hypotheses")
+            for i, hyp in enumerate(plan["competing_hypotheses"]):
+                card_class = "primary" if i == 0 else ""
+                conf       = hyp.get("confidence", "medium")
+                conf_class = f"hyp-conf-{conf}"
+                label      = ["Primary", "Alternative", "Contrarian"][i] if i < 3 else f"#{i+1}"
+                st.markdown(
+                    f"""<div class="hyp-card {card_class}">
+                        <div style="font-size:11px;font-weight:700;color:#6b7280;text-transform:uppercase;margin-bottom:4px">
+                            {label} · <span class="{conf_class}">{conf.upper()} CONFIDENCE</span>
+                        </div>
+                        <div style="font-size:13px;line-height:1.6;color:#111827">{hyp['hypothesis']}</div>
+                        <div style="font-size:11px;color:#6b7280;margin-top:6px">
+                            ✓ {hyp.get('evidence_for','')} &nbsp;|&nbsp; ✗ {hyp.get('evidence_against','')}
+                        </div>
+                    </div>""",
+                    unsafe_allow_html=True,
+                )
+        elif plan.get("hypothesis"):
+            st.markdown("#### 💡 Hypothesis")
+            st.markdown(f'<div class="hypothesis">{plan["hypothesis"]}</div>', unsafe_allow_html=True)
+
+        if plan.get("counter_arguments"):
+            with st.expander("⚔️ Counter-arguments — strongest case against this idea"):
+                for ca in plan["counter_arguments"]:
+                    st.markdown(f"- {ca}")
+
+        if plan.get("second_order_effects"):
+            with st.expander("🌊 Second-order effects"):
+                for eff in plan["second_order_effects"]:
+                    st.markdown(f"- {eff}")
+
+        if plan.get("riskiest_assumption"):
+            st.markdown("#### ⚠️ Riskiest Assumption")
+            st.warning(plan["riskiest_assumption"])
+        if plan.get("cheapest_validation"):
+            st.info(f"💡 **Cheapest validation:** {plan['cheapest_validation']}")
+
+    # ── Tab 2: Interviews ────────────────────────────────────────────
+    with tab_interviews:
+        st.markdown("#### 👥 Who to Talk To")
+        participants = plan.get("participants", [])
+        for p in participants:
+            access     = p.get("access", "Medium")
+            color      = {"Easy": "green", "Medium": "orange", "Hard": "red", "Very Hard": "red"}.get(access, "grey")
+            known_html = '<span class="known-badge">⭐ Known contact</span>' if p.get("known") else ""
+            st.markdown(
+                f"**{p.get('role','')}** &nbsp; :{color}[{access} access] &nbsp; "
+                f"*{p.get('count','')} interviews* {known_html}",
+                unsafe_allow_html=True,
+            )
+            if p.get("note"):
+                st.caption(p["note"])
+
+        if plan.get("participant_notes"):
+            st.info(plan["participant_notes"])
+
+        st.divider()
+        st.markdown("#### ❓ Interview Questions")
+        iqs = plan.get("interview_questions", [])
+        for i, iq in enumerate(iqs, 1):
+            intent = iq.get("intent", "")
+            st.markdown(
+                f"**Q{i}.** {iq['question']} <span class='iq-intent'>{intent}</span>",
+                unsafe_allow_html=True,
+            )
+            if iq.get("intent_desc"):
+                st.caption(f"*{iq['intent_desc']}*")
+            st.markdown("")
+
+    # ── Tab 3: Data & Evidence ───────────────────────────────────────
+    with tab_data:
+        st.markdown("#### 📊 Data Signals to Pull")
+        signals = plan.get("data_signals", [])
+        for sig in signals:
+            conf_label  = f" · **{sig['signal_confidence'].upper()}** signal" if sig.get("signal_confidence") else ""
+            inj_html    = '<span class="injected-badge">🔗 Your system</span>' if sig.get("injected") else ""
+            st.markdown(
+                f"**{sig['metric']}** `{sig.get('source','')}` {conf_label} {inj_html}",
+                unsafe_allow_html=True,
+            )
+            st.caption(sig.get("description", ""))
+
+        st.divider()
+        st.markdown("#### ✅ Success Criteria")
+        st.caption("Check off as you research. **Minimum 2** required to unlock the Idea Card.")
+        criteria = plan.get("success_criteria", [])
+        if len(st.session_state.checked_criteria) != len(criteria):
+            st.session_state.checked_criteria = [False] * len(criteria)
+
+        for i, sc in enumerate(criteria):
+            type_icon = {"Confirmed": "🟢", "Quantified": "🔵", "Disproved": "🟠", "Blocker": "🔴"}.get(sc.get("type", ""), "⚪")
+            st.session_state.checked_criteria[i] = st.checkbox(
+                f"{type_icon} **{sc.get('type','')}** — {sc['criterion']}",
+                value=st.session_state.checked_criteria[i],
+                key=f"crit_{i}",
+            )
+
+        checked = sum(1 for c in st.session_state.checked_criteria if c)
+        st.progress(min(checked / 2, 1.0), text=f"{checked}/2 criteria checked")
+
+    # ── Tab 4: Methods ───────────────────────────────────────────────
+    with tab_methods:
+        st.markdown("#### 🧪 Research Methods")
+        methods = plan.get("research_methods", [])
+        cols    = st.columns(len(methods)) if methods else [st]
+        for i, m in enumerate(methods):
+            col   = cols[i] if i < len(cols) else cols[0]
+            prio  = m.get("priority", "")
+            badge = "🟣 Primary" if prio == "Primary" else ("🔵 Secondary" if prio == "Secondary" else "🟢 Validation")
+            col.markdown(f"**{badge}**")
+            col.markdown(f"**{m['method']}**")
+            col.caption(m.get("rationale", ""))
+            col.markdown(f"*Target: {m.get('count', '')}*")
+
+        if plan.get("timeline_guidance"):
+            st.info(f"🗓️ {plan['timeline_guidance']}")
+
+    # ---- Navigation (outside tabs, always visible) ----
+    st.divider()
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("← Back to Verdict", use_container_width=True):
+            go("verdict")
+    with col2:
+        if st.button("Log Research Findings →", type="primary", use_container_width=True):
+            go("findings")
+
+# ------------------------------------------------------------------ #
+# SCREEN: Research Findings
+# ------------------------------------------------------------------ #
+
+def screen_findings():
+    st.markdown("## 📝 Log Research Findings")
+    st.caption("Log what you learned. Minimum 1 finding unlocks the Idea Card.")
+
+    for i in range(5):
+        st.session_state.findings[i] = st.text_area(
+            f"Finding {i+1}",
+            value=st.session_state.findings[i],
+            placeholder=f"e.g. 4 of 5 interviewees confirmed this problem occurs daily and takes 2+ hrs each time.",
+            height=68,
+            key=f"finding_{i}",
+        )
+
+    st.markdown("### 💡 Proposed Direction (optional)")
+    st.session_state.proposed_direction = st.text_area(
+        "What solution direction does your research point to?",
+        value=st.session_state.proposed_direction,
+        placeholder="e.g. An automated matching layer above SAP that routes exceptions to the right approver.",
+        height=80,
+    )
+
+    generator = IdeaCardGenerator()
+    can_generate, gate_msg = generator.check_gate(
+        st.session_state.checked_criteria,
+        st.session_state.findings,
+    )
+
+    if can_generate:
+        st.success(f"✅ {gate_msg}")
+    else:
+        st.warning(f"🔒 {gate_msg}")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("← Back to Research Plan", use_container_width=True):
+            go("research_plan")
+    with col2:
+        if st.button(
+            "Generate Idea Card →", type="primary",
+            disabled=not can_generate, use_container_width=True,
+        ):
+            go("idea_card")
+
+# ------------------------------------------------------------------ #
+# SCREEN: Idea Card
+# ------------------------------------------------------------------ #
+
+def screen_idea_card():
+    verdict   = st.session_state.verdict
+    engine    = st.session_state.engine
+    plan      = st.session_state.research_plan or {}
+    generator = IdeaCardGenerator()
+
+    card = generator.generate(
+        answers=engine.answers,
+        verdict=verdict,
+        idea_title=st.session_state.idea_title,
+        idea_description=st.session_state.idea_description,
+        research_plan=plan,
+        findings=[f for f in st.session_state.findings if f.strip()],
+        proposed_direction=st.session_state.proposed_direction,
+    )
+    st.session_state.idea_card = card
+
+    st.markdown("## 🃏 Idea Card")
+
+    st.markdown(
+        f"""<div class="idea-card-header">
+            <div style="display:flex;justify-content:space-between;align-items:flex-start">
+                <div>
+                    <div style="font-size:18px;font-weight:700;margin-bottom:4px">{card.title}</div>
+                    <div style="font-size:12px;opacity:0.8">{card.domain} · {card.origin} · {card.date_created}</div>
+                </div>
+                <div style="text-align:center;background:white;color:#6366f1;font-weight:800;
+                           font-size:22px;padding:6px 14px;border-radius:20px;white-space:nowrap">
+                    {card.verdict_emoji} {int(card.verdict_score)}
+                </div>
+            </div>
+            <div style="font-size:13px;margin-top:10px;opacity:0.9">{card.description}</div>
+        </div>""",
+        unsafe_allow_html=True,
+    )
+
+    st.markdown('<div class="idea-card-body">', unsafe_allow_html=True)
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("**Problem Statement**")
+        st.markdown(card.problem)
+        st.markdown("**Current State**")
+        st.markdown(card.current_state)
+    with col2:
+        st.markdown("**Primary User**")
+        st.markdown(card.primary_stakeholder)
+        st.markdown("**Proposed Direction**")
+        st.markdown(card.proposed_direction or "*(not yet defined)*")
+
+    st.divider()
+    st.markdown("**Hypothesis**")
+    st.markdown(f'<div class="hypothesis">{card.hypothesis}</div>', unsafe_allow_html=True)
+    st.divider()
+
+    col3, col4 = st.columns(2)
+    with col3:
+        st.markdown("**Validated Evidence**")
+        if card.validated_evidence:
+            for e in card.validated_evidence:
+                st.markdown(f"- {e}")
+        else:
+            st.caption("*(no findings logged yet)*")
+    with col4:
+        st.markdown("**Key Adoption Risk**")
+        st.markdown(card.key_adoption_risk)
+
+    st.divider()
+    st.markdown("**Open Questions for Next Stage**")
+    for oq in card.open_questions:
+        if oq.strip():
+            st.markdown(f"- {oq}")
+
+    st.markdown("**Next Actions**")
+    for na in card.next_actions:
+        st.markdown(f"- ☐ {na}")
+
+    for flag in card.confidence_flags:
+        if flag:
+            st.warning(flag)
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    st.divider()
+    col_a, col_b, col_c = st.columns(3)
+    with col_a:
+        st.download_button(
+            "📄 Export Markdown",
+            data=card.to_markdown(),
+            file_name=f"skout_{card.title[:30].replace(' ','_')}.md",
+            mime="text/markdown",
+            use_container_width=True,
+        )
+    with col_b:
+        st.download_button(
+            "📦 Export JSON",
+            data=json.dumps(card.to_dict(), indent=2),
+            file_name=f"skout_{card.title[:30].replace(' ','_')}.json",
+            mime="application/json",
+            use_container_width=True,
+        )
+    with col_c:
+        if st.button("🔄 Start New Idea", use_container_width=True):
+            for key in ["verdict", "research_plan", "findings", "checked_criteria",
+                        "proposed_direction", "idea_card", "idea_title",
+                        "idea_description", "idea_recorded"]:
+                st.session_state.pop(key, None)
+            st.session_state.engine.reset()
+            init_state()
+            go("idea_input")
+
+# ------------------------------------------------------------------ #
+# Sidebar
+# ------------------------------------------------------------------ #
+
+def render_sidebar():
+    with st.sidebar:
+        st.markdown("### 🔭 Product Skout")
+
+        ucm = st.session_state.get("ucm")
+        if ucm and ucm.is_onboarded():
+            profile = ucm.get_profile()
+            name    = profile.get("name", "")
+            role    = profile.get("role", "")
+            org     = profile.get("organization", {})
+
+            if name:
+                st.markdown(f"**{name}** · {role}")
+            if org.get("type"):
+                st.caption(f"{org.get('type')} · {org.get('size','')}")
+
+            phase = ucm.get_phase()
+            phase_colors = {0: "phase-0", 1: "phase-1", 2: "phase-2", 3: "phase-3"}
+            st.markdown("---")
+            st.markdown(
+                f'<span class="phase-badge {phase_colors[phase]}">Phase {phase} — {ucm.phase_label()}</span>',
+                unsafe_allow_html=True,
+            )
+            to_next = ucm.ideas_to_next_phase()
+            if to_next > 0:
+                st.caption(f"{to_next} idea(s) to Phase {phase + 1}")
+
+            stats = ucm.get_stats()
+            if stats["total"] > 0:
+                c1, c2 = st.columns(2)
+                c1.metric("Evaluated", stats["total"])
+                c2.metric("High priority", stats["high_priority"])
+                if stats.get("avg_score"):
+                    st.caption(f"Avg: **{stats['avg_score']}** · Top: **{stats['top_domain']}**")
+
+        if st.session_state.idea_title:
+            st.markdown("---")
+            st.markdown(f"**{st.session_state.idea_title}**")
+
+        if st.session_state.step not in ("idea_input", "onboarding"):
+            engine  = st.session_state.engine
+            summary = engine.get_answered_summary()
+            if summary:
+                st.markdown("**Answers so far:**")
+                for qid, label in [("origin", "Source"), ("q1", "Domain"),
+                                    ("q2", "Problem"), ("q3", "Stakeholder"), ("q4", "Today")]:
+                    if qid in summary and isinstance(summary[qid], str):
+                        st.caption(f"**{label}:** {summary[qid]}")
+                if "q5" in summary and isinstance(summary["q5"], dict):
+                    st.caption("**Impact:** rated ✓")
+
+        if st.session_state.verdict:
+            v = st.session_state.verdict
+            st.markdown("---")
+            st.markdown(f"**Verdict:** {v.band_emoji} {v.percent}/100")
+
+        if ucm and ucm.get_phase() >= 1:
+            history = ucm.get_ideas_history()
+            if history:
+                st.markdown("---")
+                st.markdown("**Recent ideas**")
+                for idea in history[:5]:
+                    score   = idea.get("score", 0)
+                    title   = (idea.get("title") or "Untitled")
+                    short   = title[:24] + "…" if len(title) > 24 else title
+                    outcome = idea.get("outcome")
+                    tag     = f" · {outcome}" if outcome else ""
+                    st.caption(f"**{int(score)}** · {short}{tag}")
+
+        if ucm and ucm.is_onboarded():
+            st.markdown("---")
+            if st.button("✏️ Edit Profile", use_container_width=True):
+                go("onboarding")
+
+        st.markdown("---")
+        st.caption("v0.2 · Supply Chain Edition")
+
+# ------------------------------------------------------------------ #
+# Router
+# ------------------------------------------------------------------ #
+
+render_sidebar()
+
+{
+    "onboarding":    screen_onboarding,
+    "idea_input":    screen_idea_input,
+    "origin":        screen_origin,
+    "q1":            screen_q1,
+    "q2":            screen_q2,
+    "q3":            screen_q3,
+    "q4":            screen_q4,
+    "q5":            screen_q5,
+    "verdict":       screen_verdict,
+    "research_plan": screen_research_plan,
+    "findings":      screen_findings,
+    "idea_card":     screen_idea_card,
+}.get(st.session_state.step, screen_idea_input)()
+                unsafe_allow_html=True,
+            )
+
+        with col_b:
+            ucm = st.session_state.get("ucm")
+            domain = engine.answers.get("q1", "") if engine else ""
+            bm = get_benchmark(ucm, domain, verdict.final_score)
+            if bm:
+                st.markdown(
+                    f'<div class="benchmark-row">'
+                    f'<div style="font-size:11px;font-weight:700;color:#64748b;'
+                    f'text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">'
+                    f'Your Benchmark</div>'
+                    f'<span class="benchmark-pct">{bm["percentile"]}th</span>'
+                    f'<span style="font-size:12px;color:#6b7280"> percentile</span>'
+                    f'<div style="font-size:11px;color:#94a3b8;margin-top:2px">'
+                    f'vs {bm["count"]} ideas · {bm["scope"]}</div>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.markdown(
+                    '<div class="benchmark-row" style="color:#94a3b8">'
+                    '<div style="font-size:11px;font-weight:700;text-transform:uppercase;'
+                    'letter-spacing:0.5px;margin-bottom:4px">Benchmark</div>'
+                    'Submit 2+ ideas to see percentile ranking.'
+                    '</div>',
+                    unsafe_allow_html=True,
+                )
+
+    # ── Cost estimate summary (if provided) ──
+    cost_est = st.session_state.get("cost_estimate", "").strip()
+    if cost_est:
+        st.markdown(
+            f'<div style="background:#fefce8;border:1px solid #fbbf24;border-radius:8px;'
+            f'padding:10px 14px;font-size:13px;color:#713f12;margin-top:8px">'
+            f'<strong>💰 Estimated cost impact:</strong> {cost_est}'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+    st.divider()
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("← Reevaluate", use_container_width=True):
+            st.session_state.engine.reset()
+            go("idea_input")
+    with col2:
+        if verdict.deep_dive_unlocked:
+            if st.button("🔬 Open Research Plan →", type="primary", use_container_width=True):
+                go("research_plan")
+        else:
+            st.info(f"Score {verdict.deep_think_threshold}+ unlocks the Research Plan. Your score: {verdict.percent}.")
+
+
+# ------------------------------------------------------------------ #
+# SCREEN: Research Plan  (tabbed layout)
+# ------------------------------------------------------------------ #
+
+def screen_research_plan():
+    verdict = st.session_state.verdict
+    engine  = st.session_state.engine
+    ucm     = st.session_state.get("ucm")
+
+    st.markdown("## 🔬 Research Plan")
+    st.markdown(f"**{st.session_state.idea_title}** · {verdict.band_emoji} {verdict.percent}/100")
+    st.divider()
+
+    # Mode selector
+    factory   = st.session_state.factory
+    provider  = factory.get_provider()
+    from llm.factory import RuleBasedProvider
+    is_rule_based = isinstance(provider, RuleBasedProvider)
+
+    if is_rule_based:
+        st.info("ℹ️ No API key detected — running in rule-based mode. Set `ANTHROPIC_API_KEY` in your `.env` to enable LLM enrichment.")
+        mode = "quick_scan"
+    else:
+        mode_choice = st.radio(
+            "Research depth:",
+            ["🤖 Standard (Haiku, ~15s)", "🧠 Deep Research (Sonnet + extended thinking, ~60s)"],
+            horizontal=True,
+        )
+        mode = "deep_research" if "Deep" in mode_choice else "standard"
+        if mode == "deep_research":
+            st.info("🧠 Generates 3 competing hypotheses, counter-arguments, and second-order effects.")
+
+    regen = st.button("🔄 Regenerate", use_container_width=False)
+    if st.session_state.research_plan is None or regen:
+        with st.spinner("Product Skout is thinking…" if mode == "deep_research" else "Generating plan…"):
+            planner = ResearchPlanner(provider=provider)
+            plan = planner.generate(
+                answers=engine.answers,
+                verdict=verdict,
+                idea_title=st.session_state.idea_title,
+                idea_description=st.session_state.idea_description,
+                mode=mode,
+                cost_estimate=st.session_state.get("cost_estimate", ""),
+            )
+            if ucm:
+                plan = ucm.inject_into_plan(plan)
+                methods_used = [m.get("method", "") for m in plan.get("research_methods", []) if m.get("method")]
+                if methods_used:
+                    ucm.record_research_completed(methods_used)
+            st.session_state.research_plan = plan
+            st.session_state.research_mode = mode
+
+    plan = st.session_state.research_plan
+    if not plan:
+        st.error("Could not generate research plan.")
+        return
+
+    # ---- Plan-at-a-glance summary card ----
+    n_qs  = len(plan.get("interview_questions", []))
+    n_pax = len(plan.get("participants", []))
+    n_sig = len(plan.get("data_signals", []))
+    n_cri = len(plan.get("success_criteria", []))
+    hyp_preview = (plan.get("hypothesis") or "")[:120]
+    if len(plan.get("hypothesis", "")) > 120:
+        hyp_preview += "…"
+
+    source = plan.get("source", "")
+    source_badge = ("🧠 Deep Research" if source.startswith("llm_deep")
+                    else ("🤖 LLM-enriched" if source.startswith("llm")
+                    else "📋 Rule-based"))
+
+    if ucm:
+        org = ucm.get_org_context()
+        org_note = f" · {org.get('type','')} · {org.get('size','')}" if org.get("type") else ""
+    else:
+        org_note = ""
+
+    cost_est_display = plan.get("cost_estimate", "").strip()
+    cost_html = (
+        f"<div style='font-size:12px;color:#713f12;margin-top:6px'>"
+        f"💰 <strong>Cost estimate:</strong> {cost_est_display}</div>"
+        if cost_est_display else ""
+    )
+
+    st.markdown(
+        f"""<div class="plan-summary">
+          <div style="font-size:11px;font-weight:700;color:#4c1d95;text-transform:uppercase;margin-bottom:8px">
+            {source_badge}{org_note}
+          </div>
+          <div style="margin-bottom:8px">
+            <span class="plan-stat">❓ {n_qs} interview questions</span>
+            <span class="plan-stat">👥 {n_pax} participant type(s)</span>
+            <span class="plan-stat">📊 {n_sig} data signals</span>
+            <span class="plan-stat">✅ {n_cri} success criteria</span>
+          </div>
+          {"<div style='font-size:12px;color:#3730a3;font-style:italic'>" + hyp_preview + "</div>" if hyp_preview else ""}
+          {cost_html}
+        </div>""",
+        unsafe_allow_html=True,
+    )
+
+    # Quick-proceed option
+    col_skip1, col_skip2 = st.columns([2, 1])
+    with col_skip2:
+        if st.button("⏭️ Skip to Findings →", use_container_width=True):
+            go("findings")
+
+    st.markdown("")
+
+    # ---- Tabbed content ----
+    tab_overview, tab_interviews, tab_data, tab_methods = st.tabs([
+        "📋 Overview", "👥 Interviews", "📊 Data & Evidence", "🗓️ Methods"
+    ])
+
+    # ── Tab 1: Overview ──────────────────────────────────────────────
+    with tab_overview:
+        if plan.get("competing_hypotheses"):
+            st.markdown("#### 🔀 Competing Hypotheses")
+            for i, hyp in enumerate(plan["competing_hypotheses"]):
+                card_class = "primary" if i == 0 else ""
+                conf       = hyp.get("confidence", "medium")
+                conf_class = f"hyp-conf-{conf}"
+                label      = ["Primary", "Alternative", "Contrarian"][i] if i < 3 else f"#{i+1}"
+                st.markdown(
+                    f"""<div class="hyp-card {card_class}">
+                        <div style="font-size:11px;font-weight:700;color:#6b7280;text-transform:uppercase;margin-bottom:4px">
+                            {label} · <span class="{conf_class}">{conf.upper()} CONFIDENCE</span>
+                        </div>
+                        <div style="font-size:13px;line-height:1.6;color:#111827">{hyp['hypothesis']}</div>
+                        <div style="font-size:11px;color:#6b7280;margin-top:6px">
+                            ✓ {hyp.get('evidence_for','')} &nbsp;|&nbsp; ✗ {hyp.get('evidence_against','')}
+                        </div>
+                    </div>""",
+                    unsafe_allow_html=True,
+                )
+        elif plan.get("hypothesis"):
+            st.markdown("#### 💡 Hypothesis")
+            st.markdown(f'<div class="hypothesis">{plan["hypothesis"]}</div>', unsafe_allow_html=True)
+
+        if plan.get("counter_arguments"):
+            with st.expander("⚔️ Counter-arguments — strongest case against this idea"):
+                for ca in plan["counter_arguments"]:
+                    st.markdown(f"- {ca}")
+
+        if plan.get("second_order_effects"):
+            with st.expander("🌊 Second-order effects"):
+                for eff in plan["second_order_effects"]:
+                    st.markdown(f"- {eff}")
+
+        if plan.get("riskiest_assumption"):
+            st.markdown("#### ⚠️ Riskiest Assumption")
+            st.warning(plan["riskiest_assumption"])
+        if plan.get("cheapest_validation"):
+            st.info(f"💡 **Cheapest validation:** {plan['cheapest_validation']}")
+
+    # ── Tab 2: Interviews ────────────────────────────────────────────
+    with tab_interviews:
+        st.markdown("#### 👥 Who to Talk To")
+        participants = plan.get("participants", [])
+        for p in participants:
+            access     = p.get("access", "Medium")
+            color      = {"Easy": "green", "Medium": "orange", "Hard": "red", "Very Hard": "red"}.get(access, "grey")
+            known_html = '<span class="known-badge">⭐ Known contact</span>' if p.get("known") else ""
+            st.markdown(
+                f"**{p.get('role','')}** &nbsp; :{color}[{access} access] &nbsp; "
+                f"*{p.get('count','')} interviews* {known_html}",
+                unsafe_allow_html=True,
+            )
+            if p.get("note"):
+                st.caption(p["note"])
+
+        if plan.get("participant_notes"):
+            st.info(plan["participant_notes"])
+
+        st.divider()
+        st.markdown("#### ❓ Interview Questions")
+        iqs = plan.get("interview_questions", [])
+        for i, iq in enumerate(iqs, 1):
+            intent = iq.get("intent", "")
+            st.markdown(
+                f"**Q{i}.** {iq['question']} <span class='iq-intent'>{intent}</span>",
+                unsafe_allow_html=True,
+            )
+            if iq.get("intent_desc"):
+                st.caption(f"*{iq['intent_desc']}*")
+            st.markdown("")
+
+    # ── Tab 3: Data & Evidence ───────────────────────────────────────
+    with tab_data:
+        st.markdown("#### 📊 Data Signals to Pull")
+        signals = plan.get("data_signals", [])
+        for sig in signals:
+            conf_label  = f" · **{sig['signal_confidence'].upper()}** signal" if sig.get("signal_confidence") else ""
+            inj_html    = '<span class="injected-badge">🔗 Your system</span>' if sig.get("injected") else ""
+            st.markdown(
+                f"**{sig['metric']}** `{sig.get('source','')}` {conf_label} {inj_html}",
+                unsafe_allow_html=True,
+            )
+            st.caption(sig.get("description", ""))
+
+        st.divider()
+        st.markdown("#### ✅ Success Criteria")
+        st.caption("Check off as you research. **Minimum 2** required to unlock the Idea Card.")
+        criteria = plan.get("success_criteria", [])
+        if len(st.session_state.checked_criteria) != len(criteria):
+            st.session_state.checked_criteria = [False] * len(criteria)
+
+        for i, sc in enumerate(criteria):
+            type_icon = {"Confirmed": "🟢", "Quantified": "🔵", "Disproved": "🟠", "Blocker": "🔴"}.get(sc.get("type", ""), "⚪")
+            st.session_state.checked_criteria[i] = st.checkbox(
+                f"{type_icon} **{sc.get('type','')}** — {sc['criterion']}",
+                value=st.session_state.checked_criteria[i],
+                key=f"crit_{i}",
+            )
+
+        checked = sum(1 for c in st.session_state.checked_criteria if c)
+        st.progress(min(checked / 2, 1.0), text=f"{checked}/2 criteria checked")
+
+    # ── Tab 4: Methods ───────────────────────────────────────────────
+    with tab_methods:
+        st.markdown("#### 🧪 Research Methods")
+        methods = plan.get("research_methods", [])
+        cols    = st.columns(len(methods)) if methods else [st]
+        for i, m in enumerate(methods):
+            col   = cols[i] if i < len(cols) else cols[0]
+            prio  = m.get("priority", "")
+            badge = "🟣 Primary" if prio == "Primary" else ("🔵 Secondary" if prio == "Secondary" else "🟢 Validation")
+            col.markdown(f"**{badge}**")
+            col.markdown(f"**{m['method']}**")
+            col.caption(m.get("rationale", ""))
+            col.markdown(f"*Target: {m.get('count', '')}*")
+
+        if plan.get("timeline_guidance"):
+            st.info(f"🗓️ {plan['timeline_guidance']}")
+
+    # ---- Navigation (outside tabs, always visible) ----
+    st.divider()
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("← Back to Verdict", use_container_width=True):
+            go("verdict")
+    with col2:
+        if st.button("Log Research Findings →", type="primary", use_container_width=True):
+            go("findings")
+
+# ------------------------------------------------------------------ #
+# SCREEN: Research Findings
+# ------------------------------------------------------------------ #
+
+def screen_findings():
+    st.markdown("## 📝 Log Research Findings")
+    st.caption("Log what you learned. Minimum 1 finding unlocks the Idea Card.")
+
+    for i in range(5):
+        st.session_state.findings[i] = st.text_area(
+            f"Finding {i+1}",
+            value=st.session_state.findings[i],
+            placeholder=f"e.g. 4 of 5 interviewees confirmed this problem occurs daily and takes 2+ hrs each time.",
+            height=68,
+            key=f"finding_{i}",
+        )
+
+    st.markdown("### 💡 Proposed Direction (optional)")
+    st.session_state.proposed_direction = st.text_area(
+        "What solution direction does your research point to?",
+        value=st.session_state.proposed_direction,
+        placeholder="e.g. An automated matching layer above SAP that routes exceptions to the right approver.",
+        height=80,
+    )
+
+    generator = IdeaCardGenerator()
+    can_generate, gate_msg = generator.check_gate(
+        st.session_state.checked_criteria,
+        st.session_state.findings,
+    )
+
+    if can_generate:
+        st.success(f"✅ {gate_msg}")
+    else:
+        st.warning(f"🔒 {gate_msg}")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("← Back to Research Plan", use_container_width=True):
+            go("research_plan")
+    with col2:
+        if st.button(
+            "Generate Idea Card →", type="primary",
+            disabled=not can_generate, use_container_width=True,
+        ):
+            go("idea_card")
+
+# ------------------------------------------------------------------ #
+# SCREEN: Idea Card
+# ------------------------------------------------------------------ #
+
+def screen_idea_card():
+    verdict   = st.session_state.verdict
+    engine    = st.session_state.engine
+    plan      = st.session_state.research_plan or {}
+    generator = IdeaCardGenerator()
+
+    card = generator.generate(
+        answers=engine.answers,
+        verdict=verdict,
+        idea_title=st.session_state.idea_title,
+        idea_description=st.session_state.idea_description,
+        research_plan=plan,
+        findings=[f for f in st.session_state.findings if f.strip()],
+        proposed_direction=st.session_state.proposed_direction,
+    )
+    st.session_state.idea_card = card
+
+    st.markdown("## 🃏 Idea Card")
+
+    st.markdown(
+        f"""<div class="idea-card-header">
+            <div style="display:flex;justify-content:space-between;align-items:flex-start">
+                <div>
+                    <div style="font-size:18px;font-weight:700;margin-bottom:4px">{card.title}</div>
+                    <div style="font-size:12px;opacity:0.8">{card.domain} · {card.origin} · {card.date_created}</div>
+                </div>
+                <div style="text-align:center;background:white;color:#6366f1;font-weight:800;
+                           font-size:22px;padding:6px 14px;border-radius:20px;white-space:nowrap">
+                    {card.verdict_emoji} {int(card.verdict_score)}
+                </div>
+            </div>
+            <div style="font-size:13px;margin-top:10px;opacity:0.9">{card.description}</div>
+        </div>""",
+        unsafe_allow_html=True,
+    )
+
+    st.markdown('<div class="idea-card-body">', unsafe_allow_html=True)
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("**Problem Statement**")
+        st.markdown(card.problem)
+        st.markdown("**Current State**")
+        st.markdown(card.current_state)
+    with col2:
+        st.markdown("**Primary User**")
+        st.markdown(card.primary_stakeholder)
+        st.markdown("**Proposed Direction**")
+        st.markdown(card.proposed_direction or "*(not yet defined)*")
+
+    st.divider()
+    st.markdown("**Hypothesis**")
+    st.markdown(f'<div class="hypothesis">{card.hypothesis}</div>', unsafe_allow_html=True)
+    st.divider()
+
+    col3, col4 = st.columns(2)
+    with col3:
+        st.markdown("**Validated Evidence**")
+        if card.validated_evidence:
+            for e in card.validated_evidence:
+                st.markdown(f"- {e}")
+        else:
+            st.caption("*(no findings logged yet)*")
+    with col4:
+        st.markdown("**Key Adoption Risk**")
+        st.markdown(card.key_adoption_risk)
+
+    st.divider()
+    st.markdown("**Open Questions for Next Stage**")
+    for oq in card.open_questions:
+        if oq.strip():
+            st.markdown(f"- {oq}")
+
+    st.markdown("**Next Actions**")
+    for na in card.next_actions:
+        st.markdown(f"- ☐ {na}")
+
+    for flag in card.confidence_flags:
+        if flag:
+            st.warning(flag)
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    st.divider()
+    col_a, col_b, col_c = st.columns(3)
+    with col_a:
+        st.download_button(
+            "📄 Export Markdown",
+            data=card.to_markdown(),
+            file_name=f"skout_{card.title[:30].replace(' ','_')}.md",
+            mime="text/markdown",
+            use_container_width=True,
+        )
+    with col_b:
+        st.download_button(
+            "📦 Export JSON",
+            data=json.dumps(card.to_dict(), indent=2),
+            file_name=f"skout_{card.title[:30].replace(' ','_')}.json",
+            mime="application/json",
+            use_container_width=True,
+        )
+    with col_c:
+        if st.button("🔄 Start New Idea", use_container_width=True):
+            for key in ["verdict", "research_plan", "findings", "checked_criteria",
+                        "proposed_direction", "idea_card", "idea_title",
+                        "idea_description", "idea_recorded"]:
+                st.session_state.pop(key, None)
+            st.session_state.engine.reset()
+            init_state()
+            go("idea_input")
+
+# ------------------------------------------------------------------ #
+# Sidebar
+# ------------------------------------------------------------------ #
+
+def render_sidebar():
+    with st.sidebar:
+        st.markdown("### 🔭 Product Skout")
+
+        ucm = st.session_state.get("ucm")
+        if ucm and ucm.is_onboarded():
+            profile = ucm.get_profile()
+            name    = profile.get("name", "")
+            role    = profile.get("role", "")
+            org     = profile.get("organization", {})
+
+            if name:
+                st.markdown(f"**{name}** · {role}")
+            if org.get("type"):
+                st.caption(f"{org.get('type')} · {org.get('size','')}")
+
+            phase = ucm.get_phase()
+            phase_colors = {0: "phase-0", 1: "phase-1", 2: "phase-2", 3: "phase-3"}
+            st.markdown("---")
+            st.markdown(
+                f'<span class="phase-badge {phase_colors[phase]}">Phase {phase} — {ucm.phase_label()}</span>',
+                unsafe_allow_html=True,
+            )
+            to_next = ucm.ideas_to_next_phase()
+            if to_next > 0:
+                st.caption(f"{to_next} idea(s) to Phase {phase + 1}")
+
+            stats = ucm.get_stats()
+            if stats["total"] > 0:
+                c1, c2 = st.columns(2)
+                c1.metric("Evaluated", stats["total"])
+                c2.metric("High priority", stats["high_priority"])
+                if stats.get("avg_score"):
+                    st.caption(f"Avg: **{stats['avg_score']}** · Top: **{stats['top_domain']}**")
+
+        if st.session_state.idea_title:
+            st.markdown("---")
+            st.markdown(f"**{st.session_state.idea_title}**")
+
+        if st.session_state.step not in ("idea_input", "onboarding"):
+            engine  = st.session_state.engine
+            summary = engine.get_answered_summary()
+            if summary:
+                st.markdown("**Answers so far:**")
+                for qid, label in [("origin", "Source"), ("q1", "Domain"),
+                                    ("q2", "Problem"), ("q3", "Stakeholder"), ("q4", "Today")]:
+                    if qid in summary and isinstance(summary[qid], str):
+                        st.caption(f"**{label}:** {summary[qid]}")
+                if "q5" in summary and isinstance(summary["q5"], dict):
+                    st.caption("**Impact:** rated ✓")
+
+        if st.session_state.verdict:
+            v = st.session_state.verdict
+            st.markdown("---")
+            st.markdown(f"**Verdict:** {v.band_emoji} {v.percent}/100")
+
+        if ucm and ucm.get_phase() >= 1:
+            history = ucm.get_ideas_history()
+            if history:
+                st.markdown("---")
+                st.markdown("**Recent ideas**")
+                for idea in history[:5]:
+                    score   = idea.get("score", 0)
+                    title   = (idea.get("title") or "Untitled")
+                    short   = title[:24] + "…" if len(title) > 24 else title
+                    outcome = idea.get("outcome")
+                    tag     = f" · {outcome}" if outcome else ""
+                    st.caption(f"**{int(score)}** · {short}{tag}")
+
+        if ucm and ucm.is_onboarded():
+            st.markdown("---")
+            if st.button("✏️ Edit Profile", use_container_width=True):
+                go("onboarding")
+
+        st.markdown("---")
+        st.caption("v0.2 · Supply Chain Edition")
+
+# ------------------------------------------------------------------ #
+# Router
+# ------------------------------------------------------------------ #
+
+render_sidebar()
+
+{
+    "onboarding":    screen_onboarding,
+    "idea_input":    screen_idea_input,
+    "origin":        screen_origin,
+    "q1":            screen_q1,
+    "q2":            screen_q2,
+    "q3":            screen_q3,
+    "q4":            screen_q4,
+    "q5":            screen_q5,
+    "verdict":       screen_verdict,
+    "research_plan": screen_research_plan,
+    "findings":      screen_findings,
+    "idea_card":     screen_idea_card,
+}.get(st.session_state.step, screen_idea_input)()

@@ -1,0 +1,374 @@
+version: '1.0'
+pre_question:
+  id: origin
+  text: Before we evaluate — where did this idea come from?
+  help: This determines how much weight we give the signal behind your idea.
+  type: single_select
+  multiplier_source: true
+  options:
+  - id: leadership_request
+    label: Leadership request
+    icon: 👑
+    description: Executive or leadership explicitly requested this — strong strategic
+      signal
+    multiplier: 1.35
+  - id: user_reported
+    label: User / customer reported
+    icon: 👥
+    description: One or more users explicitly raised this
+    multiplier: 1.3
+  - id: usage_data
+    label: Usage data / analytics
+    icon: 📊
+    description: Behavioral evidence from product or operational data
+    multiplier: 1.2
+  - id: partner_feedback
+    label: Partner or supplier feedback
+    icon: 🤝
+    description: Ecosystem signal from an external partner
+    multiplier: 1.1
+  - id: pm_hypothesis
+    label: Internal PM hypothesis
+    icon: 🧠
+    description: Your own insight — needs user validation
+    multiplier: 1.0
+  - id: competitive_signal
+    label: Competitive signal
+    icon: 🔍
+    description: Market or competitor intel — validate with users before committing
+    multiplier: 0.9
+questions:
+- id: q1
+  number: 1
+  text: Which domain is the primary target of this idea?
+  help: Pick the domain where the core pain lives. If it spans multiple, choose where
+    the problem originates.
+  type: single_select
+  adaptive: false
+  scoring_dimension: domain_fit
+  options:
+  - id: planning
+    label: Planning & Forecasting
+    icon: 📦
+    description: Demand, S&OP, inventory, capacity planning
+    score: 10
+    wip: false
+    hidden: false
+  - id: procurement
+    label: Procurement & Sourcing
+    icon: 🛒
+    description: Supplier management, contracts, spend control
+    score: 10
+    wip: false
+    hidden: false
+  - id: repair
+    label: Repair & MRO
+    icon: 🔧
+    description: Maintenance, returns, warranty, depot operations
+    score: 10
+    wip: false
+    hidden: false
+  - id: trade
+    label: Trade & Compliance
+    icon: 🌐
+    description: Import/export, customs, duties, regulatory
+    score: 9
+    wip: false
+    hidden: false
+  - id: fraud
+    label: Fraud & Risk
+    icon: 🚨
+    description: Invoice fraud, warranty abuse, supplier collusion
+    score: 9
+    wip: false
+    hidden: false
+- id: q2
+  number: 2
+  text: What core problem does this idea solve?
+  help: Be specific. The more precisely you name the problem, the more accurate the
+    evaluation.
+  type: single_select
+  adaptive: true
+  adaptive_field: q1
+  scoring_dimension: problem_clarity
+  default_options:
+  - id: visibility_gaps
+    label: Lack of visibility / data gaps
+    icon: 🔍
+    score: 18
+  - id: cost_leakage
+    label: Uncontrolled cost / leakage
+    icon: 💸
+    score: 20
+  - id: process_inefficiency
+    label: Process inefficiency / manual work
+    icon: ⚙️
+    score: 15
+  - id: compliance_risk
+    label: Compliance or regulatory risk
+    icon: ⚖️
+    score: 18
+  - id: other
+    label: Something else
+    icon: ✍️
+    score: 10
+  domain_options:
+    planning:
+    - id: forecast_accuracy
+      label: Forecast accuracy
+      icon: 📉
+      score: 25
+    - id: inventory_optimization
+      label: Inventory overstock / stockout
+      icon: 📦
+      score: 22
+    - id: sop_process
+      label: S&OP planning gaps
+      icon: 🔄
+      score: 20
+    - id: demand_sensing
+      label: Demand signal quality
+      icon: 📡
+      score: 20
+    - id: capacity_planning
+      label: Capacity planning
+      icon: 📊
+      score: 18
+    - id: other
+      label: Something else
+      icon: ✍️
+      score: 10
+    procurement:
+    - id: supplier_risk
+      label: Supplier risk & visibility
+      icon: ⚠️
+      score: 25
+    - id: invoice_reconciliation
+      label: Invoice matching & reconciliation
+      icon: 🧾
+      score: 22
+    - id: contract_compliance
+      label: Contract compliance / leakage
+      icon: 📋
+      score: 22
+    - id: po_cycle_time
+      label: PO approval delays
+      icon: ⏱️
+      score: 18
+    - id: tail_spend
+      label: Tail spend / maverick buying
+      icon: 💰
+      score: 18
+    - id: other
+      label: Something else
+      icon: ✍️
+      score: 10
+    repair:
+    - id: turnaround_time
+      label: Turnaround time / SLA failure
+      icon: ⏱️
+      score: 25
+    - id: parts_availability
+      label: Parts availability
+      icon: 🔩
+      score: 22
+    - id: counterfeit_parts
+      label: Parts authenticity
+      icon: 🔍
+      score: 22
+    - id: warranty_claims
+      label: Warranty leakage
+      icon: 📄
+      score: 20
+    - id: cost_per_repair
+      label: Repair cost control
+      icon: 💵
+      score: 20
+    - id: reverse_logistics
+      label: Reverse logistics
+      icon: ↩️
+      score: 18
+    - id: other
+      label: Something else
+      icon: ✍️
+      score: 10
+    trade:
+    - id: customs_delays
+      label: Customs & documentation delays
+      icon: 📋
+      score: 20
+    - id: duty_optimization
+      label: Duty optimization
+      icon: 💰
+      score: 18
+    - id: compliance_risk
+      label: Regulatory compliance risk
+      icon: ⚖️
+      score: 22
+    - id: trade_partner
+      label: Trade partner management
+      icon: 🤝
+      score: 18
+    - id: other
+      label: Something else
+      icon: ✍️
+      score: 10
+    fraud:
+    - id: invoice_fraud
+      label: Invoice / payment fraud
+      icon: 💸
+      score: 25
+    - id: supplier_collusion
+      label: Supplier collusion
+      icon: 🤐
+      score: 22
+    - id: internal_controls
+      label: Internal controls gaps
+      icon: 🔒
+      score: 20
+    - id: warranty_fraud
+      label: Returns / warranty fraud
+      icon: 🚨
+      score: 22
+    - id: other
+      label: Something else
+      icon: ✍️
+      score: 10
+- id: q3
+  number: 3
+  text: Who experiences this problem most acutely?
+  help: The person with the pain is rarely the buyer. Identifying the real sufferer
+    drives better research.
+  type: single_select
+  adaptive: false
+  scoring_dimension: stakeholder_reach
+  options:
+  - id: sc_planners
+    label: Supply Chain Planners
+    icon: 🧑‍💼
+    description: Demand planners, S&OP analysts
+    score: 12
+  - id: procurement_mgrs
+    label: Procurement / Category Mgrs
+    icon: 🤝
+    description: Buyers, sourcing leads, category heads
+    score: 12
+  - id: operations
+    label: Operations / Field Teams
+    icon: 🏭
+    description: Technicians, depot staff, field engineers
+    score: 10
+  - id: finance
+    label: Finance & Compliance
+    icon: 🏦
+    description: AP/AR, internal audit, legal & compliance
+    score: 10
+  - id: leadership
+    label: Leadership / C-suite
+    icon: 👔
+    description: CPO, COO, VP Supply Chain, CFO
+    score: 15
+  - id: external_partners
+    label: External Partners
+    icon: 🌍
+    description: Suppliers, 3PLs, service providers
+    score: 8
+- id: q4
+  number: 4
+  text: How is this problem handled today?
+  help: Manual workarounds signal high greenfield potential. A mature competitor means
+    differentiation is required.
+  type: single_select
+  adaptive: false
+  scoring_dimension: market_gap
+  options:
+  - id: manual_spreadsheet
+    label: Manual / spreadsheets
+    icon: 📊
+    description: No real tooling — everything is hand-managed
+    score: 20
+  - id: legacy_erp
+    label: Legacy ERP (SAP/Oracle)
+    icon: 🏛️
+    description: System exists but can't solve this problem
+    score: 16
+  - id: siloed_tools
+    label: Multiple disconnected tools
+    icon: 🧩
+    description: Point solutions with no integration
+    score: 14
+  - id: internal_tool
+    label: Internal tool (not scalable)
+    icon: 🛠️
+    description: Works today but won't grow with the business
+    score: 12
+  - id: competitor_exists
+    label: Competitor product exists
+    icon: 🏆
+    description: Market is served but poorly
+    score: 10
+  - id: not_handled
+    label: Not handled — ignored
+    icon: ❌
+    description: Blind spot — the problem has no current solution
+    score: 20
+- id: q5
+  number: 5
+  text: Rate the problem on three dimensions
+  help: These three factors replace a single 'impact' estimate — easier to answer
+    honestly.
+  type: multi_factor
+  adaptive: false
+  scoring_dimension: business_impact
+  factors:
+  - id: frequency
+    label: Frequency
+    question: How often does this problem occur?
+    icon: 📅
+    options:
+    - id: daily
+      label: Daily or more
+      score: 10
+    - id: weekly
+      label: Several times a week
+      score: 7
+    - id: monthly
+      label: Weekly / monthly
+      score: 4
+    - id: rare
+      label: Quarterly or rare
+      score: 1
+  - id: severity
+    label: Pain Severity
+    question: What happens when it hits?
+    icon: 🔥
+    options:
+    - id: stops_work
+      label: Work completely stops
+      score: 10
+    - id: major_workaround
+      label: Major workaround needed
+      score: 7
+    - id: slows_down
+      label: Noticeably slows things down
+      score: 4
+    - id: minor
+      label: Minor friction only
+      score: 1
+  - id: workaround_effort
+    label: Workaround Cost
+    question: What does the current fix cost?
+    icon: ⚙️
+    options:
+    - id: heavy_manual
+      label: '>10 hrs/week manual effort'
+      score: 10
+    - id: dedicated_headcount
+      label: Dedicated headcount
+      score: 7
+    - id: costly_tool
+      label: Expensive 3rd-party tool
+      score: 4
+    - id: minimal
+      label: Minimal — easy workaround
+      score: 1

@@ -1,0 +1,149 @@
+{
+  "_meta": {
+    "version": "1.0",
+    "description": "Known supply chain failure modes used by the challenger agent to stress-test recommendations.",
+    "sources": ["APICS Body of Knowledge", "MIT Supply Chain Management", "Real-world SC disruption case studies"]
+  },
+  "failure_patterns": [
+    {
+      "id": "bullwhip_amplification",
+      "name": "Bullwhip Effect Amplification",
+      "severity": "HIGH",
+      "description": "Small changes in downstream demand get amplified into large swings upstream, creating costly overstock and stockout cycles.",
+      "triggers": ["reduce order frequency", "batch orders", "consolidate orders", "order less often", "reduce order quantity", "forecast sharing"],
+      "challenge_questions": [
+        "Does this recommendation change order frequency or batch sizes upstream in the supply chain?",
+        "Will this amplify demand variability for upstream suppliers?",
+        "Has demand signal sharing with Tier 1 and Tier 2 suppliers been considered?"
+      ],
+      "safe_conditions": ["VMI in place", "supplier collaboration program", "CPFR implemented"],
+      "example_failure": "Retailer reduces order frequency to cut PO costs, supplier overproduces to hedge, bullwhip amplifies upstream"
+    },
+    {
+      "id": "single_source_dependency",
+      "name": "Single Source Dependency",
+      "severity": "CRITICAL",
+      "description": "Concentrating supply in one vendor eliminates redundancy and creates catastrophic risk if that supplier fails.",
+      "triggers": ["single supplier", "sole source", "consolidate suppliers", "reduce supplier base", "preferred vendor", "one supplier"],
+      "challenge_questions": [
+        "Is this recommendation creating or increasing reliance on a single supplier?",
+        "What is the supplier's financial health and geopolitical exposure?",
+        "What is the recovery time if this supplier fails or goes offline for 4+ weeks?"
+      ],
+      "safe_conditions": ["dual source policy confirmed", "safety stock covers lead time", "alternative qualified"],
+      "example_failure": "COVID-19: Companies with single-source suppliers for PPE had zero alternatives when Chinese factories shut down"
+    },
+    {
+      "id": "safety_stock_erosion",
+      "name": "Safety Stock Erosion",
+      "severity": "HIGH",
+      "description": "Cutting safety stock without improving lead time reliability or forecast accuracy leads to stockouts during any demand spike.",
+      "triggers": ["reduce safety stock", "eliminate safety stock", "eliminate all safety", "cut inventory", "eliminate buffer", "lean inventory", "zero inventory", "JIT", "just-in-time", "reduce stock levels", "remove buffer", "no safety stock"],
+      "challenge_questions": [
+        "Has supplier lead time variability (CV) been measured before proposing safety stock reduction?",
+        "What is current forecast accuracy and is it above 80%?",
+        "What is the cost of a stockout vs. the carrying cost saving from the reduction?"
+      ],
+      "safe_conditions": ["lead time CV < 15%", "forecast accuracy > 80%", "demand is stable and seasonal pattern is known"],
+      "example_failure": "Toyota lean inventory: 2011 Japan earthquake wiped out supply for key semiconductor components with no buffer"
+    },
+    {
+      "id": "working_capital_trap",
+      "name": "Working Capital Trap",
+      "severity": "MEDIUM",
+      "description": "Optimizing one part of the supply chain improves costs but locks up cash elsewhere, creating a liquidity problem.",
+      "triggers": ["extend payment terms", "increase DPO", "delay payments", "pay suppliers later", "extend terms"],
+      "challenge_questions": [
+        "Does this recommendation shift cash burden onto suppliers who may not absorb it?",
+        "Could this trigger supplier financial distress or price increases at next contract renewal?",
+        "Has the full C2C cycle impact been modeled?"
+      ],
+      "safe_conditions": ["supplier SCF program available", "large suppliers can absorb terms shift"],
+      "example_failure": "UK retailers extending DPO to 120 days caused multiple small supplier bankruptcies, triggering supply disruption"
+    },
+    {
+      "id": "demand_averaging_blindspot",
+      "name": "Demand Averaging Blindspot",
+      "severity": "HIGH",
+      "description": "Using annual averages hides seasonal spikes and lumpy demand patterns, causing under-preparation for peak periods.",
+      "triggers": ["annual forecast", "average demand", "average inventory", "annual planning", "yearly plan", "aggregate demand"],
+      "challenge_questions": [
+        "Has seasonality been explicitly modeled, or is this recommendation based on annual averages?",
+        "What is the peak-to-trough demand ratio?",
+        "Has promotional uplift or event-driven demand been accounted for?"
+      ],
+      "safe_conditions": ["weekly or monthly demand model in use", "seasonal index applied", "event calendar integrated"],
+      "example_failure": "Grocery retailers optimizing on annual averages ran out of flour and yeast in March 2020 as COVID demand spiked 8x"
+    },
+    {
+      "id": "geopolitical_concentration",
+      "name": "Geopolitical Supply Concentration",
+      "severity": "HIGH",
+      "description": "High dependence on suppliers or manufacturing in a single geopolitical region creates systemic risk from tariffs, conflict, or natural disasters.",
+      "triggers": ["offshore", "nearshore", "single region", "concentrate manufacturing", "low cost country", "LCCS"],
+      "challenge_questions": [
+        "What percentage of supply will be concentrated in a single country or region after this change?",
+        "Has tariff risk or trade war scenario been modeled?",
+        "What is the resourcing plan if this region becomes unavailable for 6+ months?"
+      ],
+      "safe_conditions": ["dual region sourcing maintained", "tariff scenario modeled", "strategic inventory covers 90-day risk"],
+      "example_failure": "US-China tariff escalation 2018-2019: companies with over 80% China sourcing faced sudden 25% cost increase with no alternative"
+    },
+    {
+      "id": "it_integration_underestimation",
+      "name": "IT Integration Underestimation",
+      "severity": "MEDIUM",
+      "description": "Supply chain initiatives routinely underestimate the time and cost of integrating with ERP, WMS, or TMS systems, causing delays and budget overruns.",
+      "triggers": ["integrate", "connect systems", "data pipeline", "ERP", "SAP", "real-time data", "API", "automation", "digitize"],
+      "challenge_questions": [
+        "Has an IT dependency assessment been done for ERP or WMS or TMS integration?",
+        "Are the required APIs or data feeds already available, or do they need to be built?",
+        "Has the implementation timeline accounted for IT change management and UAT cycles?"
+      ],
+      "safe_conditions": ["IT scoping done", "API availability confirmed", "integration partner identified"],
+      "example_failure": "Most WMS and TMS implementations run 40-60% over timeline due to underestimated ERP integration complexity"
+    },
+    {
+      "id": "supplier_capability_assumption",
+      "name": "Supplier Capability Assumption",
+      "severity": "HIGH",
+      "description": "Assuming suppliers can meet new requirements without validating their actual capability.",
+      "triggers": ["supplier will", "vendors can", "supplier to provide", "require suppliers", "mandate supplier", "supplier capability"],
+      "challenge_questions": [
+        "Has supplier readiness been assessed for the new requirements?",
+        "Do suppliers have the systems, capacity, or financial strength to comply?",
+        "What is the fallback if key suppliers cannot meet the new requirements?"
+      ],
+      "safe_conditions": ["supplier readiness assessment done", "pilot with 2-3 suppliers completed"],
+      "example_failure": "Walmart RFID mandate: most small suppliers lacked capability to comply, forcing retailers to absorb tagging costs"
+    },
+    {
+      "id": "change_management_gap",
+      "name": "Change Management Gap",
+      "severity": "MEDIUM",
+      "description": "Supply chain process changes fail at the human layer as warehouse teams, planners, and procurement staff resist or misapply new tools.",
+      "triggers": ["new process", "change process", "implement system", "rollout", "train", "new tool", "new workflow", "deploy"],
+      "challenge_questions": [
+        "Has the change management plan been designed for frontline operators, not just managers?",
+        "What is the adoption risk if warehouse or planning staff revert to old processes?",
+        "Has the incentive structure been aligned to reward the new behavior?"
+      ],
+      "safe_conditions": ["change champion identified per site", "training plan developed", "incentive alignment confirmed"],
+      "example_failure": "65% of ERP implementations underperform due to poor adoption by operational staff even when technically functional"
+    },
+    {
+      "id": "cost_only_optimization",
+      "name": "Cost-Only Optimization",
+      "severity": "HIGH",
+      "description": "Recommendations driven purely by cost reduction without modeling impact on service level, resilience, or customer satisfaction often create hidden downstream costs.",
+      "triggers": ["cut costs", "reduce cost", "save money", "cost reduction", "lower spend", "cheapest", "cost optimization"],
+      "challenge_questions": [
+        "Has the service level impact of this cost reduction been modeled?",
+        "What is the total cost of ownership, including hidden costs of lower reliability?",
+        "Has resilience impact been explicitly scored?"
+      ],
+      "safe_conditions": ["service level maintained at current or above", "resilience score neutral or positive", "cost-service tradeoff accepted by stakeholders"],
+      "example_failure": "Boeing 737 MAX supply chain extreme cost focus led to quality control gaps that contributed to systemic safety failures"
+    }
+  ]
+}

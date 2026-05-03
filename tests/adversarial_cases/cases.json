@@ -1,0 +1,138 @@
+{
+  "_meta": {
+    "version": "1.0",
+    "description": "Adversarial test cases for the domain knowledge engine. Every case in must_fail MUST be blocked or flagged. Every case in should_pass MUST be approved.",
+    "run_with": "pytest tests/adversarial_cases/test_adversarial.py -v"
+  },
+  "must_fail": [
+    {
+      "id": "AF001",
+      "name": "Eliminate all safety stock",
+      "recommendation": "We should eliminate all safety stock across our warehouse network to reduce holding costs and free up working capital. This will save approximately 15% on inventory carrying costs.",
+      "context": {
+        "industry": "retail",
+        "demand_pattern": "seasonal",
+        "supply_chain_maturity": "defined",
+        "disruption_environment": "elevated"
+      },
+      "expected_failures": ["safety_stock_erosion", "resilience_impact"],
+      "reason": "Eliminating all safety stock during seasonal demand with elevated disruptions is indefensible. Must BLOCK."
+    },
+    {
+      "id": "AF002",
+      "name": "Single source all critical components",
+      "recommendation": "To reduce procurement complexity and get better pricing, we should consolidate all critical component sourcing to our preferred supplier, SupplierX. This will reduce PO processing costs by 30%.",
+      "context": {
+        "industry": "automotive",
+        "demand_pattern": "stable",
+        "supply_chain_maturity": "optimised",
+        "disruption_environment": "stable"
+      },
+      "expected_failures": ["single_source_dependency"],
+      "reason": "Single-sourcing critical components is a CRITICAL supply chain risk regardless of disruption environment."
+    },
+    {
+      "id": "AF003",
+      "name": "Forecast improvement claim without data",
+      "recommendation": "By implementing our new AI demand forecasting platform, we will improve forecast accuracy from 60% to 95% within 3 months, allowing us to cut safety stock by 40% immediately.",
+      "context": {
+        "industry": "pharma",
+        "demand_pattern": "lumpy",
+        "supply_chain_maturity": "reactive",
+        "disruption_environment": "stable"
+      },
+      "expected_failures": ["forecast_accuracy_claim", "safety_stock_erosion"],
+      "reason": "95% accuracy claim in 3 months is unrealistic. Reactive maturity cannot support advanced ML. Must flag."
+    },
+    {
+      "id": "AF004",
+      "name": "JIT in volatile environment",
+      "recommendation": "We should implement just-in-time inventory management across our entire supply chain to achieve zero inventory and maximum capital efficiency.",
+      "context": {
+        "industry": "electronics",
+        "demand_pattern": "lumpy",
+        "supply_chain_maturity": "defined",
+        "disruption_environment": "volatile"
+      },
+      "expected_failures": ["safety_stock_erosion", "bullwhip_amplification"],
+      "reason": "JIT in a volatile environment with lumpy demand is a high-risk combination. Must BLOCK or CONDITIONAL."
+    },
+    {
+      "id": "AF005",
+      "name": "Extend payment terms to 180 days",
+      "recommendation": "To improve our working capital position, we will extend supplier payment terms from 30 days to 180 days across our entire supplier base, starting immediately.",
+      "context": {
+        "industry": "retail",
+        "demand_pattern": "stable",
+        "supply_chain_maturity": "optimised",
+        "disruption_environment": "stable"
+      },
+      "expected_failures": ["working_capital_trap"],
+      "reason": "180-day DPO will cause SME supplier bankruptcies and supply disruption. Must flag as CRITICAL risk."
+    },
+    {
+      "id": "AF006",
+      "name": "No IT integration plan",
+      "recommendation": "We will connect our ERP, WMS, TMS, and supplier portals into a real-time data platform to provide end-to-end supply chain visibility across 50 suppliers within 6 months.",
+      "context": {
+        "industry": "automotive",
+        "demand_pattern": "stable",
+        "supply_chain_maturity": "defined",
+        "disruption_environment": "stable"
+      },
+      "expected_failures": ["it_integration_underestimation"],
+      "reason": "ERP+WMS+TMS+50 suppliers in 6 months is massively underestimated. Must flag."
+    },
+    {
+      "id": "AF007",
+      "name": "Cost-only optimisation ignoring resilience",
+      "recommendation": "Cut all supply chain costs by 25% through supplier consolidation, inventory reduction, and shifting to sea freight for all shipments including time-sensitive components.",
+      "context": {
+        "industry": "automotive",
+        "demand_pattern": "stable",
+        "supply_chain_maturity": "optimised",
+        "disruption_environment": "elevated"
+      },
+      "expected_failures": ["cost_only_optimization", "single_source_dependency"],
+      "reason": "Blanket 25% cost cut with no resilience guardrails in elevated disruption environment. Must flag multiple risks."
+    }
+  ],
+  "should_pass": [
+    {
+      "id": "SP001",
+      "name": "Dual-source critical supplier",
+      "recommendation": "Qualify a second source for our top 3 critical components, maintaining the primary supplier for 70% of volume and the secondary for 30%. This reduces single-source risk while leveraging existing supplier relationships.",
+      "context": {
+        "industry": "automotive",
+        "demand_pattern": "stable",
+        "supply_chain_maturity": "optimised",
+        "disruption_environment": "stable"
+      },
+      "reason": "Textbook resilience improvement. Should PASS with no critical challenges."
+    },
+    {
+      "id": "SP002",
+      "name": "Gradual safety stock reduction with lead time data",
+      "recommendation": "After measuring supplier lead time CV (currently at 8%), we propose a 15% phased reduction in safety stock over 6 months, with rollback triggers if fill rate drops below 96%.",
+      "context": {
+        "industry": "retail",
+        "demand_pattern": "stable",
+        "supply_chain_maturity": "optimised",
+        "disruption_environment": "stable"
+      },
+      "reason": "Data-backed, phased, with explicit rollback criteria. Should PASS."
+    },
+    {
+      "id": "SP003",
+      "name": "S&OP process improvement with executive sponsorship",
+      "recommendation": "Implement a monthly S&OP process with executive sponsorship from the COO. Phase 1 covers Sales and Operations alignment on 13-week demand signal. Phase 2 extends to supplier collaboration in month 4.",
+      "context": {
+        "industry": "food_beverage",
+        "demand_pattern": "seasonal",
+        "supply_chain_maturity": "defined",
+        "disruption_environment": "stable"
+      },
+      "reason": "Well-scoped, phased, with named sponsorship. Should PASS."
+    }
+  ]
+}

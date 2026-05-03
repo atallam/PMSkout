@@ -1,0 +1,41 @@
+custom_extensions:
+  domains: []
+domain_preferences:
+  primary: procurement
+  secondary: []
+  wip_interest: []
+learning_data:
+  domain_history:
+    planning: 3
+    procurement: 3
+  ideas_submitted: 6
+  outcomes_tracked: 0
+  research_completed: 4
+profile:
+  id: ''
+  name: Avinash Tallam
+  organization:
+    name: Dell Technologies
+    regions:
+    - Global
+    size: Enterprise (5k+)
+    type: Other
+  role: senior PM
+research_preferences:
+  custom_data_sources:
+  - Other
+  deep_think_threshold: 80
+  default_interview_count: 5
+  known_stakeholders: []
+  preferred_methods:
+  - User Interviews
+  - Process Observation
+  - Data Pull (ERP/AP)
+scoring_customization:
+  enabled: false
+  weights:
+    business_impact: 30
+    domain_fit: 10
+    market_gap: 20
+    problem_clarity: 25
+    stakeholder_reach: 15

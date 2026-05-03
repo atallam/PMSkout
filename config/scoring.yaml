@@ -1,0 +1,87 @@
+version: "1.0"
+
+dimensions:
+  business_impact:
+    max_points: 30
+    description: "Frequency × Pain severity × Workaround effort (Q5)"
+  problem_clarity:
+    max_points: 25
+    description: "Specificity and sharpness of the problem (Q2)"
+  market_gap:
+    max_points: 20
+    description: "Gap between current state and an ideal solution (Q4)"
+  stakeholder_reach:
+    max_points: 15
+    description: "Who is affected and how many (Q3)"
+  domain_fit:
+    max_points: 10
+    description: "Alignment to supported supply chain domains (Q1)"
+
+verdict_bands:
+  high_priority:
+    min: 80
+    max: 100
+    label: "High Priority"
+    emoji: "🚀"
+    color: "#16a34a"
+    action: "deep_dive_unlock"
+    headline: "Strong signal. Deep dive unlocked."
+    message: "Clear problem, real market gap, and measurable pain. This idea is worth investing research time in."
+    next_steps:
+      - "Launch Research Plan to validate your hypothesis"
+      - "Identify 5–8 users to interview this week"
+      - "Pull relevant data signals from your ERP / ticketing system"
+  promising:
+    min: 60
+    max: 79
+    label: "Promising"
+    emoji: "🔍"
+    color: "#2563eb"
+    action: "guided_refinement"
+    headline: "Promising, but needs sharpening."
+    message: "Real problem, but the scope, validation, or impact signal is thin. Refine before committing to deep research."
+    next_steps:
+      - "Talk to at least 3 more users to validate the problem"
+      - "Quantify the workaround cost — put a number on it"
+      - "Define what 'solved' looks like before diving deeper"
+  needs_clarity:
+    min: 40
+    max: 59
+    label: "Needs Clarity"
+    emoji: "⚠️"
+    color: "#ca8a04"
+    action: "reevaluate_prompt"
+    headline: "Problem is fuzzy. Reevaluate."
+    message: "Frequency is too low, pain too diffuse, or the market gap is unclear. This isn't ready for research investment."
+    next_steps:
+      - "Reframe the problem statement — who specifically and when exactly?"
+      - "Use the JTBD template: 'When [situation], I want to [motivation]'"
+      - "Run a quick discovery interview before re-submitting"
+  not_ready:
+    min: 0
+    max: 39
+    label: "Not Ready"
+    emoji: "❌"
+    color: "#dc2626"
+    action: "reconsider_scope"
+    headline: "Not ready to evaluate."
+    message: "The idea needs more grounding before it can be scored meaningfully. Go back to problem discovery."
+    next_steps:
+      - "Start with problem discovery — talk to 3 users about their day"
+      - "Look for patterns in support tickets or usage data first"
+      - "Re-submit once the problem has more evidence behind it"
+
+confidence_flags:
+  high_score_low_validation:
+    condition_origin: ["pm_hypothesis", "leadership_directive", "competitive_intel"]
+    score_threshold: 70
+    type: "warning"
+    message: "High score, low external validation. This idea scores well, but it's built on internal assumptions. Consider user research before treating this as confirmed."
+  wip_domain:
+    domains: []
+    type: "info"
+    message: "This domain is still being developed. Scoring is based on generic supply chain signals — use with caution."
+  single_low_factor:
+    q5_any_factor_score: 1
+    type: "caution"
+    message: "One of your Q5 factors scored very low. If this problem is rare or easy to work around, validate that it's worth solving before investing in research."

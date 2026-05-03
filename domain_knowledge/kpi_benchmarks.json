@@ -1,0 +1,156 @@
+{
+  "_meta": {
+    "version": "1.0",
+    "sources": ["APICS SCOR 12.0", "Gartner Supply Chain Top 25", "ASCM Body of Knowledge 2023"],
+    "last_updated": "2024-01"
+  },
+  "kpis": {
+    "inventory_turnover": {
+      "description": "Times inventory is sold/consumed in a period. Higher = leaner.",
+      "unit": "times/year",
+      "direction": "higher_is_better",
+      "industry_ranges": {
+        "retail": { "min": 4, "max": 12, "ideal": 8, "red_flag_below": 2 },
+        "automotive": { "min": 10, "max": 20, "ideal": 14, "red_flag_below": 5 },
+        "pharma": { "min": 3, "max": 8, "ideal": 5, "red_flag_below": 2 },
+        "food_beverage": { "min": 15, "max": 30, "ideal": 22, "red_flag_below": 8 },
+        "electronics": { "min": 6, "max": 15, "ideal": 10, "red_flag_below": 3 },
+        "industrial": { "min": 4, "max": 10, "ideal": 6, "red_flag_below": 2 },
+        "default": { "min": 4, "max": 10, "ideal": 6, "red_flag_below": 2 }
+      },
+      "red_flag_changes": [
+        "Sudden drop >30% signals demand collapse or overbuying",
+        "Sudden increase >50% may signal safety stock erosion",
+        "Below 2x in any industry indicates serious overstock risk"
+      ],
+      "keywords": ["inventory", "stock", "turnover", "ITO", "inventory turns", "days inventory"]
+    },
+    "perfect_order_rate": {
+      "description": "% of orders delivered complete, on time, damage-free, with correct documentation.",
+      "unit": "percent",
+      "direction": "higher_is_better",
+      "industry_ranges": {
+        "retail": { "min": 92, "max": 98, "ideal": 96, "red_flag_below": 90 },
+        "automotive": { "min": 95, "max": 99, "ideal": 98, "red_flag_below": 93 },
+        "pharma": { "min": 96, "max": 99.5, "ideal": 99, "red_flag_below": 95 },
+        "food_beverage": { "min": 93, "max": 98, "ideal": 96, "red_flag_below": 90 },
+        "default": { "min": 92, "max": 98, "ideal": 96, "red_flag_below": 90 }
+      },
+      "red_flag_changes": [
+        "Any recommendation that could drop POR below 95% requires resilience justification",
+        "Reducing safety stock without lead time improvement risks POR degradation"
+      ],
+      "keywords": ["perfect order", "POR", "order fulfillment", "on-time delivery", "OTIF", "fill rate"]
+    },
+    "cash_to_cash_cycle": {
+      "description": "Days between paying for inventory and collecting payment from customer.",
+      "unit": "days",
+      "direction": "lower_is_better",
+      "industry_ranges": {
+        "retail": { "min": 10, "max": 45, "ideal": 20, "red_flag_above": 60 },
+        "automotive": { "min": 30, "max": 80, "ideal": 50, "red_flag_above": 100 },
+        "pharma": { "min": 60, "max": 120, "ideal": 80, "red_flag_above": 150 },
+        "food_beverage": { "min": 5, "max": 25, "ideal": 12, "red_flag_above": 40 },
+        "default": { "min": 20, "max": 60, "ideal": 35, "red_flag_above": 90 }
+      },
+      "red_flag_changes": [
+        "Lengthening C2C by >20% requires working capital justification",
+        "Recommendations that extend DPO without supplier agreement are high risk"
+      ],
+      "keywords": ["cash to cash", "C2C", "working capital", "DIO", "DSO", "DPO", "cash cycle", "payment terms"]
+    },
+    "supplier_lead_time": {
+      "description": "Time from purchase order to goods receipt.",
+      "unit": "days",
+      "direction": "lower_is_better",
+      "industry_ranges": {
+        "retail": { "min": 7, "max": 45, "ideal": 14, "red_flag_above": 60 },
+        "automotive": { "min": 14, "max": 60, "ideal": 30, "red_flag_above": 90 },
+        "pharma": { "min": 30, "max": 120, "ideal": 60, "red_flag_above": 180 },
+        "electronics": { "min": 30, "max": 120, "ideal": 60, "red_flag_above": 150 },
+        "default": { "min": 14, "max": 60, "ideal": 30, "red_flag_above": 90 }
+      },
+      "variance_thresholds": {
+        "stable": { "cv_max": 0.10, "description": "Safe to reduce safety stock" },
+        "moderate": { "cv_max": 0.25, "description": "Maintain safety stock; monitor closely" },
+        "volatile": { "cv_max": 1.00, "description": "Do NOT reduce safety stock; increase buffers" }
+      },
+      "red_flag_changes": [
+        "Lead time CV >15% makes safety stock reduction dangerous",
+        "Single-source lead times are inherently riskier than multi-source"
+      ],
+      "keywords": ["lead time", "LT", "supplier lead", "replenishment", "order cycle", "procurement time"]
+    },
+    "forecast_accuracy": {
+      "description": "% of demand forecast that matches actual demand (100 - MAPE).",
+      "unit": "percent",
+      "direction": "higher_is_better",
+      "industry_ranges": {
+        "retail": { "min": 70, "max": 90, "ideal": 82, "red_flag_below": 60 },
+        "automotive": { "min": 80, "max": 95, "ideal": 88, "red_flag_below": 70 },
+        "pharma": { "min": 65, "max": 85, "ideal": 75, "red_flag_below": 55 },
+        "food_beverage": { "min": 72, "max": 88, "ideal": 80, "red_flag_below": 60 },
+        "default": { "min": 70, "max": 88, "ideal": 78, "red_flag_below": 60 }
+      },
+      "red_flag_changes": [
+        "Forecast accuracy below 60% makes any inventory optimization unreliable",
+        "Improving forecast by >15% through a single ML initiative is rarely achievable in year 1"
+      ],
+      "keywords": ["forecast", "accuracy", "MAPE", "MAE", "demand planning", "prediction", "forecast error"]
+    },
+    "supplier_on_time_delivery": {
+      "description": "% of supplier deliveries arriving on the promised date.",
+      "unit": "percent",
+      "direction": "higher_is_better",
+      "industry_ranges": {
+        "retail": { "min": 88, "max": 97, "ideal": 94, "red_flag_below": 85 },
+        "automotive": { "min": 92, "max": 99, "ideal": 96, "red_flag_below": 90 },
+        "pharma": { "min": 90, "max": 98, "ideal": 95, "red_flag_below": 88 },
+        "default": { "min": 88, "max": 97, "ideal": 93, "red_flag_below": 84 }
+      },
+      "red_flag_changes": [
+        "SOTD below 85% makes JIT or lean inventory practices unsafe",
+        "Reducing safety stock requires SOTD improvement first"
+      ],
+      "keywords": ["on time delivery", "OTD", "SOTD", "supplier performance", "delivery reliability", "schedule adherence"]
+    },
+    "days_inventory_outstanding": {
+      "description": "Average number of days inventory is held before being sold.",
+      "unit": "days",
+      "direction": "lower_is_better",
+      "industry_ranges": {
+        "retail": { "min": 15, "max": 60, "ideal": 30, "red_flag_above": 90 },
+        "automotive": { "min": 20, "max": 50, "ideal": 30, "red_flag_above": 75 },
+        "pharma": { "min": 45, "max": 120, "ideal": 75, "red_flag_above": 180 },
+        "electronics": { "min": 20, "max": 70, "ideal": 45, "red_flag_above": 100 },
+        "default": { "min": 20, "max": 65, "ideal": 40, "red_flag_above": 100 }
+      },
+      "keywords": ["DIO", "days inventory", "days on hand", "DOH", "inventory days", "holding days"]
+    },
+    "warehouse_utilization": {
+      "description": "% of warehouse capacity actively used for storage.",
+      "unit": "percent",
+      "direction": "optimal_range",
+      "industry_ranges": {
+        "default": { "min": 60, "max": 85, "ideal": 75, "red_flag_above": 95, "red_flag_below": 40 }
+      },
+      "red_flag_changes": [
+        "Utilization >95% creates operational bottlenecks and safety risks",
+        "Utilization <40% suggests overbuilt infrastructure or demand collapse"
+      ],
+      "keywords": ["warehouse", "utilization", "storage", "capacity", "occupancy", "DC utilization"]
+    },
+    "order_to_cash": {
+      "description": "Time from customer order placement to cash receipt.",
+      "unit": "days",
+      "direction": "lower_is_better",
+      "industry_ranges": {
+        "retail": { "min": 1, "max": 14, "ideal": 5, "red_flag_above": 30 },
+        "automotive": { "min": 7, "max": 45, "ideal": 20, "red_flag_above": 60 },
+        "pharma": { "min": 14, "max": 60, "ideal": 30, "red_flag_above": 90 },
+        "default": { "min": 7, "max": 30, "ideal": 15, "red_flag_above": 45 }
+      },
+      "keywords": ["order to cash", "O2C", "OTC", "order cycle", "fulfillment cycle", "customer order"]
+    }
+  }
+}
