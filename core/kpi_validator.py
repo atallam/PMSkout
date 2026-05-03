@@ -27,6 +27,18 @@ _BENCHMARKS_FILE = Path(__file__).parent.parent / "domain_knowledge" / "kpi_benc
 
 @dataclass
 class KPIWarning:
+    """
+    A single KPI benchmark violation or caution raised by the KPI Validator.
+
+    Attributes:
+        kpi_id:          Machine-readable KPI identifier from kpi_benchmarks.json.
+        kpi_name:        Human-readable KPI name (e.g. "Forecast Accuracy").
+        severity:        Warning level: RED (critical violation) / AMBER (caution) / INFO.
+        message:         Explanation of why this recommendation may push the KPI out of bounds.
+        benchmark:       Industry benchmark range dict {min, max, ideal} for reference.
+        triggered_by:    The keyword or phrase in the recommendation text that triggered this.
+        recommendation:  Actionable corrective guidance for the PM.
+    """
     kpi_id: str
     kpi_name: str
     severity: str          # RED / AMBER / INFO
@@ -37,9 +49,11 @@ class KPIWarning:
 
     @property
     def severity_emoji(self) -> str:
+        """Emoji icon for the severity level: 🔴 RED, 🟡 AMBER, 🔵 INFO."""
         return {"RED": "🔴", "AMBER": "🟡", "INFO": "🔵"}.get(self.severity, "⚪")
 
     def to_dict(self) -> Dict:
+        """Serialise warning fields (including severity_emoji) to a plain dict for JSON export."""
         return {
             "kpi_id": self.kpi_id,
             "kpi_name": self.kpi_name,
@@ -74,10 +88,25 @@ class KPIValidator:
     }
 
     def __init__(self, industry: str = "default"):
+        """
+        Initialise the validator for a specific industry.
+
+        Args:
+            industry: Industry name or alias (e.g. "automotive", "auto", "pharma").
+                      Normalised via KNOWN_INDUSTRIES; falls back to "default" benchmarks
+                      if the industry is not in the map.
+        """
         self._benchmarks = self._load_benchmarks()
         self.industry = self.KNOWN_INDUSTRIES.get(industry.lower(), industry)
 
     def _load_benchmarks(self) -> Dict:
+        """
+        Load KPI benchmark data from domain_knowledge/kpi_benchmarks.json.
+
+        Returns:
+            Parsed benchmark dict with top-level "kpis" key.
+            Returns {"kpis": {}} if the file does not exist.
+        """
         if not _BENCHMARKS_FILE.exists():
             return {"kpis": {}}
         with open(_BENCHMARKS_FILE, encoding="utf-8") as f:

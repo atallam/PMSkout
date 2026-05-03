@@ -29,6 +29,20 @@ from typing import Dict, List, Optional, Any
 
 @dataclass
 class Challenge:
+    """
+    A single failure-mode challenge identified by the Challenger Agent.
+
+    Attributes:
+        pattern_id:          Unique identifier from failure_patterns.json or "llm_<name>".
+        name:                Short descriptive name for the failure pattern.
+        severity:            Risk severity: CRITICAL / HIGH / MEDIUM / LOW.
+        description:         One-sentence description of why this pattern is risky.
+        matched_triggers:    Keywords from the recommendation text that triggered this pattern.
+        challenge_questions: Sharp questions the team must answer before proceeding.
+        safe_conditions:     Conditions under which this pattern is not a concern.
+        example_failure:     Real-world example of this failure occurring.
+        source:              "rule_based" (keyword match) or "llm" (LLM-generated).
+    """
     pattern_id: str
     name: str
     severity: str          # CRITICAL / HIGH / MEDIUM / LOW
@@ -41,13 +55,16 @@ class Challenge:
 
     @property
     def severity_emoji(self) -> str:
+        """Emoji for the severity level: 🔴 CRITICAL, 🟠 HIGH, 🟡 MEDIUM, 🟢 LOW."""
         return {"CRITICAL": "🔴", "HIGH": "🟠", "MEDIUM": "🟡", "LOW": "🟢"}.get(self.severity, "⚪")
 
     @property
     def severity_order(self) -> int:
+        """Sort key for descending severity (CRITICAL=0, HIGH=1, MEDIUM=2, LOW=3)."""
         return {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}.get(self.severity, 4)
 
     def to_dict(self) -> Dict:
+        """Serialise all fields including computed severity_emoji to a plain dict."""
         return {
             "pattern_id": self.pattern_id,
             "name": self.name,
@@ -85,6 +102,12 @@ class ChallengerAgent:
         self._patterns = self._load_patterns()
 
     def _load_patterns(self) -> List[Dict]:
+        """
+        Load failure patterns from domain_knowledge/failure_patterns.json.
+
+        Returns:
+            List of pattern dicts. Returns an empty list if the file does not exist.
+        """
         if not self._PATTERNS_FILE.exists():
             return []
         with open(self._PATTERNS_FILE, encoding="utf-8") as f:
@@ -128,6 +151,19 @@ class ChallengerAgent:
     # ---------------------------------------------------------------- #
 
     def _build_llm_prompt(self, recommendation: str, context: Dict, rule_challenges: List[Challenge]) -> str:
+        """
+        Build a structured prompt asking the LLM to identify additional risks
+        not already covered by the rule-based patterns.
+
+        Args:
+            recommendation:  The supply chain recommendation text to stress-test.
+            context:         Dict of contextual information (domain, industry, etc.).
+            rule_challenges: Challenges already identified by rule-based matching,
+                             passed to the LLM so it does not duplicate them.
+
+        Returns:
+            Formatted prompt string ready for LLM.generate().
+        """
         existing = "\n".join(f"- {c.name}" for c in rule_challenges) if rule_challenges else "None detected yet."
         ctx_str = "\n".join(f"  {k}: {v}" for k, v in context.items() if v) if context else "  No additional context."
 
@@ -204,6 +240,16 @@ If no additional risks exist beyond those already identified, respond with: NO_A
 
     @staticmethod
     def _extract_field(text: str, field: str) -> str:
+        """
+        Extract a labelled field value from a structured LLM response block.
+
+        Args:
+            text:  A single block of LLM response text (between "---" separators).
+            field: The field label to extract (e.g. "RISK", "SEVERITY", "QUESTION").
+
+        Returns:
+            Stripped field value string, or "" if the field is not found.
+        """
         match = re.search(rf"^{field}:\s*(.+)$", text, re.MULTILINE | re.IGNORECASE)
         return match.group(1).strip() if match else ""
 

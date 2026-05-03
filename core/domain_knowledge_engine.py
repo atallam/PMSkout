@@ -42,6 +42,23 @@ from .context_checker import ContextChecker, ContextCheckResult
 
 @dataclass
 class DomainAuditResult:
+    """
+    Unified result from all 7 domain knowledge patterns.
+
+    Attributes:
+        scor_domain:         SCOR domain identifier (e.g. "planning", "procurement").
+        scor_risks:          Top-3 domain-specific risk statements from the SCOR library.
+        challenges:          List of Challenge objects from the Challenger Agent (Pattern #2).
+        challenger_summary:  Severity count summary dict from ChallengerAgent.summarise().
+        kpi_warnings:        List of KPIWarning objects from the KPI Validator (Pattern #3).
+        rag_chunks:          Most relevant KnowledgeChunk objects from RAG retrieval (Pattern #4).
+        domain_score:        DomainScoreResult from the Domain Scorer (Pattern #6).
+        context_check:       ContextCheckResult from the Context Checker (Pattern #7).
+        overall_verdict:     Synthesised verdict: PASS / CONDITIONAL / BLOCK / INSUFFICIENT_CONTEXT.
+        risk_level:          Aggregate risk level: LOW / MEDIUM / HIGH / CRITICAL.
+        reasoning:           Human-readable explanation of the final verdict.
+        action_items:        Concrete next steps derived from all pattern findings.
+    """
     # Pattern #1 — SCOR classification
     scor_domain: str
     scor_risks: List[str]
@@ -70,6 +87,7 @@ class DomainAuditResult:
 
     @property
     def verdict_emoji(self) -> str:
+        """Emoji icon corresponding to overall_verdict (✅ PASS, ⚠️ CONDITIONAL, 🚫 BLOCK, ❓ INSUFFICIENT_CONTEXT)."""
         mapping = {
             "PASS": "✅",
             "CONDITIONAL": "⚠️",
@@ -80,6 +98,7 @@ class DomainAuditResult:
 
     @property
     def verdict_color(self) -> str:
+        """Hex colour for the verdict badge in the Streamlit UI."""
         mapping = {
             "PASS": "#16a34a",
             "CONDITIONAL": "#ca8a04",
@@ -90,6 +109,7 @@ class DomainAuditResult:
 
     @property
     def risk_color(self) -> str:
+        """Hex colour for the risk-level badge: green → LOW, amber → MEDIUM, orange → HIGH, red → CRITICAL."""
         return {
             "LOW": "#16a34a",
             "MEDIUM": "#ca8a04",
@@ -98,6 +118,7 @@ class DomainAuditResult:
         }.get(self.risk_level, "#6b7280")
 
     def to_dict(self) -> Dict:
+        """Serialise all fields (including computed properties) to a plain dict for JSON export."""
         return {
             "scor_domain": self.scor_domain,
             "scor_risks": self.scor_risks,

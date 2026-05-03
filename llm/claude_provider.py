@@ -15,10 +15,24 @@ class ClaudeProvider(BaseLLMProvider):
     """
 
     def __init__(self, config: Dict):
+        """
+        Args:
+            config: Parsed llm_config.yaml dict (loaded by LLMFactory).
+                    Must contain `providers.claude.api_key_env` and `modes` keys.
+        """
         self.config = config
-        self._client = None
+        self._client = None   # Lazy-initialised on first generate() call
 
     def _get_client(self):
+        """
+        Lazily instantiate and cache the Anthropic client.
+
+        Returns:
+            anthropic.Anthropic client instance.
+
+        Raises:
+            ImportError: If the `anthropic` package is not installed.
+        """
         if self._client is None:
             try:
                 import anthropic
@@ -31,10 +45,25 @@ class ClaudeProvider(BaseLLMProvider):
         return self._client
 
     def is_available(self) -> bool:
+        """Return True if the ANTHROPIC_API_KEY (or configured env var) is set."""
         api_key_env = self.config["providers"]["claude"]["api_key_env"]
         return bool(os.getenv(api_key_env))
 
     def generate(self, prompt: str, system: str = "", mode: str = "standard") -> str:
+        """
+        Generate a completion via the Anthropic Messages API.
+
+        Args:
+            prompt: User message / task description.
+            system: Optional system prompt passed to the API.
+            mode:   "standard" uses the configured model with temperature sampling.
+                    "deep_research" activates extended thinking (Claude reasons before
+                    responding using the configured thinking_budget_tokens).
+
+        Returns:
+            Generated text string (thinking blocks are filtered out).
+            Returns "" if the response contains no text blocks.
+        """
         client = self._get_client()
         mode_cfg = self.config["modes"].get(mode, self.config["modes"]["standard"])
 

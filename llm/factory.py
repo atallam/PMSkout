@@ -18,9 +18,14 @@ class RuleBasedProvider(BaseLLMProvider):
     The research planner uses rule-based templates when this is active.
     """
     def is_available(self) -> bool:
+        """Always returns True — the rule-based provider requires no API key."""
         return True
 
     def generate(self, prompt: str, system: str = "", mode: str = "standard") -> str:
+        """
+        Return the sentinel string "__RULE_BASED__" so callers know to use
+        template/heuristic logic instead of parsed LLM output.
+        """
         return "__RULE_BASED__"
 
 
@@ -34,6 +39,16 @@ class LLMFactory:
     """
 
     def __init__(self, config_path: str = "config/llm_config.yaml"):
+        """
+        Load LLM configuration from YAML.
+
+        Args:
+            config_path: Path to llm_config.yaml. Must contain `providers`,
+                         `modes`, and optionally `thresholds` and `default_mode` keys.
+
+        Raises:
+            FileNotFoundError: If the config file does not exist.
+        """
         p = Path(config_path)
         if not p.exists():
             raise FileNotFoundError(f"LLM config not found: {config_path}")

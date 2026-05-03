@@ -71,6 +71,33 @@ _SCOR_DESCRIPTIONS: Dict[str, str] = {
 
 @dataclass
 class VerdictResult:
+    """
+    Immutable result object returned by ScoringEngine.compute().
+
+    Attributes:
+        base_score:         Raw sum of dimension scores before origin multiplier.
+        final_score:        base_score × origin_multiplier, capped at 100.
+        origin_multiplier:  Multiplier derived from the idea's source (Q0).
+        band:               Machine-readable verdict band id (e.g. "high_priority").
+        band_label:         Human-readable band label (e.g. "High Priority").
+        band_emoji:         Emoji for the band (e.g. "🟢").
+        band_color:         Hex colour for the band used in UI.
+        action:             Recommended PM action for this band.
+        headline:           Short verdict headline for display.
+        message:            Detailed verdict explanation.
+        next_steps:         Ordered list of recommended next steps.
+        dimension_scores:   Per-dimension raw scores {dimension_id: score}.
+        dimension_max:      Max possible points per dimension from config.
+        confidence_flags:   List of flag dicts {type, message} for warnings.
+        is_wip_domain:      True if the selected domain is marked WIP in config.
+        deep_dive_unlocked: True if final_score ≥ deep_think_threshold.
+        deep_think_threshold: Minimum score to unlock Research Plan (default 80).
+        scor_category:      SCOR framework domain (Plan/Source/Make/Deliver/Return/Enable).
+        scor_icon:          Emoji icon for the SCOR category.
+        scor_description:   One-line description of the SCOR category.
+        wsjf_score:         Weighted Shortest Job First urgency score (0–10).
+        opportunity_gap:    Ulwick ODI opportunity gap score (0–20).
+    """
     base_score: float
     final_score: float
     origin_multiplier: float
@@ -125,18 +152,24 @@ class ScoringEngine:
             return yaml.safe_load(f)
 
     def _find_question(self, qid: str) -> Optional[Dict]:
+        """Look up a question definition by its id string."""
         for q in self.questions["questions"]:
             if q["id"] == qid:
                 return q
         return None
 
     def _score_q1(self, answer_id: str) -> float:
+        """Return the domain-fit score for the Q1 (domain) answer."""
         for opt in self._find_question("q1")["options"]:
             if opt["id"] == answer_id:
                 return float(opt.get("score", 0))
         return 0.0
 
     def _score_q2(self, answer_id: str, domain: str) -> float:
+        """
+        Return the problem-clarity score for Q2, capped at 25.
+        Uses domain-specific options first; falls back to default_options.
+        """
         q2 = self._find_question("q2")
         domain_opts = q2.get("domain_options", {}).get(domain, [])
         for opt in domain_opts:
@@ -148,18 +181,24 @@ class ScoringEngine:
         return 0.0
 
     def _score_q3(self, answer_id: str) -> float:
+        """Return the stakeholder-reach score for the Q3 answer."""
         for opt in self._find_question("q3").get("options", []):
             if opt["id"] == answer_id:
                 return float(opt.get("score", 0))
         return 0.0
 
     def _score_q4(self, answer_id: str) -> float:
+        """Return the market-gap score for the Q4 (current state) answer."""
         for opt in self._find_question("q4").get("options", []):
             if opt["id"] == answer_id:
                 return float(opt.get("score", 0))
         return 0.0
 
     def _score_q5(self, q5_answers: Dict) -> tuple:
+        """
+        Score the three Q5 factors (frequency, severity, workaround_effort).
+        Returns (total_score capped at 30, {factor_id: pts} dict).
+        """
         if not q5_answers:
             return 0.0, {}
         q5 = self._find_question("q5")
@@ -177,6 +216,11 @@ class ScoringEngine:
         return min(30.0, total), factor_scores
 
     def _get_weights(self) -> Dict[str, float]:
+        """
+        Return per-dimension weight multipliers.
+        At Phase 2+ the user may supply custom weights in user_context.yaml;
+        otherwise every dimension gets a multiplier of 1.0 (no adjustment).
+        """
         custom = self.user_ctx.get("scoring_customization", {})
         if custom.get("enabled") and custom.get("weights"):
             w = custom["weights"]
@@ -189,6 +233,16 @@ class ScoringEngine:
         return {dim: 1.0 for dim in self.scoring["dimensions"]}
 
     def _check_flags(self, answers, base_score, is_wip, q5_factors) -> List[Dict]:
+        """
+        Build confidence-flag list from scoring config rules.
+
+        Flags produced:
+          - "warning"  if origin has low external validation but score is high.
+          - "info"     if the selected domain is marked WIP.
+          - "caution"  if any single Q5 factor has a minimum score (score=1).
+
+        Returns list of {type, message} dicts (messages with empty text filtered out).
+        """
         flags = []
         flag_cfg = self.scoring.get("confidence_flags", {})
         origin = answers.get("origin", "")

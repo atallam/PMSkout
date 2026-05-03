@@ -99,6 +99,24 @@ HIGH_RISK_COMBOS = [
 
 @dataclass
 class ContextCheckResult:
+    """
+    Result from the Context Checker (Pattern #7).
+
+    Attributes:
+        is_sufficient:         True when context is adequate to proceed (SUFFICIENT or CONDITIONAL).
+        missing_critical:      Field IDs for CRITICAL tier fields that are absent.
+                               Any missing critical field sets verdict to INSUFFICIENT.
+        missing_important:     Field IDs for IMPORTANT tier fields that are absent.
+                               Triggers CONDITIONAL verdict but does not block evaluation.
+        missing_helpful:       Field IDs for HELPFUL tier fields that are absent.
+                               Noted but does not change verdict.
+        risk_combo_warnings:   High-risk combination messages when context + recommendation
+                               text match a known dangerous pattern (e.g. JIT + volatile demand).
+        questions_to_ask:      Structured question dicts for each missing field, suitable
+                               for rendering in the Streamlit UI (see format_questions_for_ui).
+        verdict:               SUFFICIENT / CONDITIONAL / INSUFFICIENT.
+        completeness_pct:      Percentage of context schema fields that are filled (0–100).
+    """
     is_sufficient: bool
     missing_critical: List[str] = field(default_factory=list)
     missing_important: List[str] = field(default_factory=list)
@@ -110,9 +128,11 @@ class ContextCheckResult:
 
     @property
     def verdict_emoji(self) -> str:
+        """Emoji for the context verdict: ✅ SUFFICIENT, ⚠️ CONDITIONAL, 🔴 INSUFFICIENT."""
         return {"SUFFICIENT": "✅", "CONDITIONAL": "⚠️", "INSUFFICIENT": "🔴"}.get(self.verdict, "❓")
 
     def to_dict(self) -> Dict:
+        """Serialise all fields including verdict_emoji to a plain dict for JSON export."""
         return {
             "is_sufficient": self.is_sufficient,
             "missing_critical": self.missing_critical,

@@ -68,6 +68,21 @@ RESILIENCE_BLOCK = -0.50  # Hard block
 
 @dataclass
 class DomainScoreResult:
+    """
+    Result from the Domain Scorer's 5-dimension weighted rubric.
+
+    Attributes:
+        dimension_scores:          Raw per-dimension scores.
+                                   cost/resilience/service_level in [-1, +1];
+                                   implementation_complexity/time_to_value in [0, 1].
+        weighted_score:            Final weighted composite score in [0, 1].
+        verdict:                   PASS (≥0.55 + resilience OK) / CONDITIONAL / BLOCK.
+        blocking_reason:           Explanation string if verdict is BLOCK, else None.
+        tradeoffs:                 2-3 human-readable tradeoff statements.
+        confidence:                Scoring confidence: HIGH (LLM, rich context) /
+                                   MEDIUM (LLM, partial context) / LOW (rule-based).
+        source:                    "llm" if LLM scored dimensions, "rule_based" otherwise.
+    """
     dimension_scores: Dict[str, float]   # {dimension_id: score}
     weighted_score: float                # Final 0-1 weighted score
     verdict: str                         # PASS / CONDITIONAL / BLOCK
@@ -78,17 +93,24 @@ class DomainScoreResult:
 
     @property
     def verdict_emoji(self) -> str:
+        """Emoji for the verdict: ✅ PASS, ⚠️ CONDITIONAL, 🚫 BLOCK."""
         return {"PASS": "✅", "CONDITIONAL": "⚠️", "BLOCK": "🚫"}.get(self.verdict, "❓")
 
     @property
     def verdict_color(self) -> str:
+        """Hex colour for the verdict badge in the Streamlit UI."""
         return {"PASS": "#16a34a", "CONDITIONAL": "#ca8a04", "BLOCK": "#dc2626"}.get(self.verdict, "#6b7280")
 
     @property
     def score_pct(self) -> int:
+        """Weighted score expressed as an integer percentage (0–100)."""
         return int(self.weighted_score * 100)
 
     def to_dict(self) -> Dict:
+        """
+        Serialise all fields — including labels, descriptions, and computed properties —
+        to a nested dict suitable for JSON export or Streamlit display.
+        """
         return {
             "dimension_scores": {
                 k: {"score": v, "label": DIMENSION_LABELS[k], "description": DIMENSION_DESCRIPTIONS[k]}
@@ -117,6 +139,11 @@ class DomainScorer:
     """
 
     def __init__(self, llm_provider=None):
+        """
+        Args:
+            llm_provider: Optional BaseLLMProvider for LLM-powered dimension scoring.
+                          If None, the rule-based heuristic scorer is used instead.
+        """
         self.llm = llm_provider
 
     # ---------------------------------------------------------------- #
@@ -124,6 +151,17 @@ class DomainScorer:
     # ---------------------------------------------------------------- #
 
     def _build_llm_prompt(self, recommendation: str, context: Dict) -> str:
+        """
+        Build a structured prompt that instructs the LLM to score each of the
+        5 dimensions and identify tradeoffs.
+
+        Args:
+            recommendation: Free-text description of the supply chain recommendation.
+            context:        Dict with domain, industry, and other contextual fields.
+
+        Returns:
+            Formatted prompt string to pass to LLM.generate().
+        """
         ctx_str = "\n".join(f"  {k}: {v}" for k, v in context.items() if v) if context else "  No additional context."
 
         return f"""You are a supply chain strategy expert scoring a recommendation across 5 dimensions.

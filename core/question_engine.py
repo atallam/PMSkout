@@ -33,6 +33,16 @@ class QuestionEngine:
 
     def __init__(self, config_path: str = "config/questions.yaml",
                  user_context_path: str = "config/user_context.yaml"):
+        """
+        Load question and user-context configs. Initialises an empty answers dict.
+
+        Args:
+            config_path:       Path to questions.yaml (question definitions + options).
+            user_context_path: Path to user_context.yaml (custom domains + scoring weights).
+
+        Raises:
+            FileNotFoundError: If either config file does not exist.
+        """
         self.config = self._load(config_path)
         self.user_ctx = self._load(user_context_path)
         self.answers: Dict[str, Any] = {}
@@ -43,6 +53,18 @@ class QuestionEngine:
 
     @staticmethod
     def _load(path: str) -> Dict:
+        """
+        Read and parse a YAML file into a dict.
+
+        Args:
+            path: Relative or absolute path to the YAML file.
+
+        Returns:
+            Parsed dict from the YAML contents.
+
+        Raises:
+            FileNotFoundError: If the file does not exist at the given path.
+        """
         p = Path(path)
         if not p.exists():
             raise FileNotFoundError(f"Config not found: {path}")

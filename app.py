@@ -25,9 +25,24 @@ from core.research_planner import ResearchPlanner
 from core.idea_card import IdeaCardGenerator
 from core.user_context_manager import (
     UserContextManager,
-    ORG_TYPES, ORG_SIZES, REGIONS, DATA_SYSTEMS, DOMAIN_LABELS, METHOD_LABELS,
+    ORG_TYPES, ORG_SIZES, REGIONS, DATA_SYSTEMS, METHOD_LABELS,
 )
+from core.constants import Q2_LABELS, Q3_LABELS, Q4_LABELS, FREQ_LABELS, SEV_LABELS, DOMAIN_LABELS
 from llm.factory import LLMFactory
+# ── Phase 4 & 5 modules ─────────────────────────────────────────────── #
+from core.signal_ingester import SignalIngester
+from core.ideas_like_this import IdeasLikeThis
+from core.brm_tracker import (
+    BRMTracker, OutcomeRecord, BenefitItem,
+    BENEFIT_CATEGORIES, REALISATION_STATUS, MEASUREMENT_UNITS,
+)
+from core.dmaic_engine import DMAICEngine
+from core.action_tracker import ActionTracker, ActionItem, ACTION_STATUSES
+from core.integrations import (
+    to_notion_markdown, to_jira_json_str, to_csv,
+    build_webhook_payload, post_webhook,
+    get_team_ideas, share_to_team, add_team_comment,
+)
 from core.domain_knowledge_engine import DomainKnowledgeEngine
 
 # ------------------------------------------------------------------ #
@@ -224,6 +239,11 @@ STEPS = [
 ]
 
 def init_state():
+    """
+    Initialise all Streamlit session state keys with safe defaults.
+    Called once on page load and again when the user starts a new idea.
+    Only sets keys that are not already present — never overwrites existing state.
+    """
     defaults = {
         "step":              "idea_input",
         "idea_title":        "",
@@ -244,6 +264,14 @@ def init_state():
         "cost_estimate":     "",
         "domain_audit":      None,
         "domain_audit_ctx":  {},
+        # ── Phase 4: ingestion + pattern matching + BRM + DMAIC ──
+        "signal":            None,   # IdeaSignal from multi-source ingestion
+        "dmaic_canvas":      None,   # DMAICCanvas from DMAIC engine
+        # ── Phase 5: action tracker + integrations + team mode ──
+        "actions_seeded":    False,  # True once action items auto-seeded from plan
+        "team_mode":         False,  # Team Mode toggle
+        "team_id":           "default",
+        "webhook_url":       "",     # user-configured webhook endpoint
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -257,6 +285,11 @@ init_state()
 
 @st.cache_resource
 def load_engines():
+    """
+    Load and cache the three stateless engines (shared across Streamlit reruns).
+    Using @st.cache_resource ensures heavy YAML parsing happens only once per session.
+    Returns (QuestionEngine, ScoringEngine, LLMFactory).
+    """
     engine  = QuestionEngine("config/questions.yaml", "config/user_context.yaml")
     scorer  = ScoringEngine("config/scoring.yaml", "config/questions.yaml", "config/user_context.yaml")
     factory = LLMFactory("config/llm_config.yaml")
@@ -264,6 +297,11 @@ def load_engines():
 
 @st.cache_resource
 def load_ucm():
+    """
+    Load and cache the UserContextManager (reads user_context.yaml + data/ideas.json).
+    Ensures the data/ directory exists before loading.
+    Cached so profile + history persist across Streamlit reruns within a session.
+    """
     Path("data").mkdir(exist_ok=True)
     ucm = UserContextManager(
         context_path="config/user_context.yaml",
@@ -294,15 +332,21 @@ except Exception as e:
 # ------------------------------------------------------------------ #
 
 def go(step: str):
+    """Navigate to a named step and force a Streamlit rerun."""
     st.session_state.step = step
     st.rerun()
 
 def prev_step(current: str):
+    """Navigate to the step immediately before `current` in the STEPS list."""
     idx = STEPS.index(current)
     if idx > 0:
         go(STEPS[idx - 1])
 
 def progress_bar(step: str):
+    """
+    Render a "Step X of Y" label + Streamlit progress bar for question steps.
+    Only shown during the 6 question steps (origin → q5); hidden on other screens.
+    """
     question_steps = ["origin", "q1", "q2", "q3", "q4", "q5"]
     if step in question_steps:
         idx   = question_steps.index(step) + 1
@@ -323,77 +367,22 @@ def safe_radio(label, options_list, index=0, key=None):
 # Phase 1 Helper Functions
 # ------------------------------------------------------------------ #
 
-# Human-readable label maps (mirrors research_planner.py — kept in sync)
-_Q2_LABELS_APP = {
-    "forecast_accuracy":     "forecast accuracy problems",
-    "inventory_optimization":"inventory overstock / stockout",
-    "sop_process":           "S&OP planning gaps",
-    "demand_sensing":        "demand signal quality",
-    "capacity_planning":     "capacity planning",
-    "supplier_risk":         "supplier risk and visibility gaps",
-    "invoice_reconciliation":"invoice matching and reconciliation",
-    "contract_compliance":   "contract compliance / spend leakage",
-    "po_cycle_time":         "PO approval delays",
-    "tail_spend":            "tail spend / maverick buying",
-    "turnaround_time":       "SLA failures and turnaround delays",
-    "parts_availability":    "parts availability shortfalls",
-    "warranty_claims":       "warranty claim leakage",
-    "cost_per_repair":       "repair cost control",
-    "counterfeit_parts":     "parts authenticity / counterfeit risk",
-    "reverse_logistics":     "reverse logistics inefficiency",
-    "visibility_gaps":       "visibility and data gaps",
-    "cost_leakage":          "uncontrolled cost / leakage",
-    "process_inefficiency":  "process inefficiency and manual work",
-    "compliance_risk":       "compliance and regulatory risk",
-    "other":                 "a custom problem",
-}
-
-_Q3_LABELS_APP = {
-    "sc_planners":       "Supply Chain Planners",
-    "procurement_mgrs":  "Procurement / Category Managers",
-    "operations":        "Operations and Field Teams",
-    "finance":           "Finance and Compliance Teams",
-    "leadership":        "Supply Chain Leadership",
-    "external_partners": "External Partners and Suppliers",
-}
-
-_Q4_CURRENT_STATE_APP = {
-    "manual_spreadsheet": "relying on manual spreadsheet processes",
-    "legacy_erp":         "working around legacy ERP limitations",
-    "siloed_tools":       "juggling multiple disconnected tools",
-    "internal_tool":      "using a homegrown tool that doesn't scale",
-    "competitor_exists":  "using an existing market solution that falls short",
-    "not_handled":        "leaving the problem entirely unaddressed",
-}
-
-_FREQ_LABELS_APP = {
-    "daily":   "daily",
-    "weekly":  "several times a week",
-    "monthly": "weekly or monthly",
-    "rare":    "on occasion",
-}
-
-_SEV_LABELS_APP = {
-    "stops_work":       "halting operations",
-    "major_workaround": "requiring significant workarounds",
-    "slows_down":       "slowing down their work",
-    "minor":            "causing minor friction",
-}
-
+# Label maps imported from core.constants — single source of truth.
+# Q2_LABELS, Q3_LABELS, Q4_LABELS, FREQ_LABELS, SEV_LABELS are all available.
 
 def get_jtbd_statement(engine) -> str:
-    """Build a JTBD-style problem statement from current answers."""
-    answers  = engine.answers
-    q2       = answers.get("q2", "")
-    q3       = answers.get("q3", "")
-    q4       = answers.get("q4", "")
-    q5       = answers.get("q5", {}) or {}
+    """Build a JTBD-style 'When X, Y faces Z' problem statement from current answers."""
+    answers = engine.answers
+    q2 = answers.get("q2", "")
+    q3 = answers.get("q3", "")
+    q4 = answers.get("q4", "")
+    q5 = answers.get("q5", {}) or {}
 
-    problem       = _Q2_LABELS_APP.get(q2, q2.replace("_", " ") if q2 else "this problem")
-    stakeholder   = _Q3_LABELS_APP.get(q3, "supply chain teams")
-    current_state = _Q4_CURRENT_STATE_APP.get(q4, "existing processes")
-    freq          = _FREQ_LABELS_APP.get(q5.get("frequency", ""), "regularly")
-    severity      = _SEV_LABELS_APP.get(q5.get("severity", ""), "causing disruption")
+    problem       = Q2_LABELS.get(q2, q2.replace("_", " ") if q2 else "this problem")
+    stakeholder   = Q3_LABELS.get(q3, "supply chain teams")
+    current_state = Q4_LABELS.get(q4, "existing processes")
+    freq          = FREQ_LABELS.get(q5.get("frequency", ""), "regularly")
+    severity      = SEV_LABELS.get(q5.get("severity", ""), "causing disruption")
 
     return (
         f"When **{current_state}**, **{stakeholder}** face **{problem}** "
@@ -478,6 +467,12 @@ _GATE_RECOMMENDATIONS = {
 # ------------------------------------------------------------------ #
 
 def screen_onboarding():
+    """
+    SCREEN: Onboarding Wizard
+    Collects user profile, organisation details, primary domains, connected data
+    systems, and research preferences. Calls ucm.apply_onboarding() on submit.
+    Skip button available for users who want to start immediately.
+    """
     st.markdown("# 🔭 Welcome to Product Skout")
     st.markdown(
         "Product Skout learns your context over time — your organisation, domains, and preferred "
@@ -564,6 +559,12 @@ def screen_onboarding():
 # ------------------------------------------------------------------ #
 
 def screen_idea_input():
+    """
+    SCREEN: Idea Input
+    Home screen where the PM enters an idea title and 1–2 sentence description.
+    Redirects unonboarded users to the onboarding wizard first.
+    Shows phase badge and launches the question flow on submit.
+    """
     ucm = st.session_state.get("ucm")
     if ucm and not ucm.is_onboarded():
         go("onboarding")
@@ -597,6 +598,60 @@ def screen_idea_input():
         height=85,
     )
 
+    # ── Phase 4: Multi-source Signal Ingestion ──────────────────────
+    with st.expander("📡 Import signal from Slack, Jira, or ERP export", expanded=False):
+        st.caption(
+            "Paste messages, Jira JSON, or upload a CSV export. "
+            "Skout will auto-detect the source and pre-fill the idea fields above."
+        )
+        source_tab, upload_tab = st.tabs(["📋 Paste text / JSON", "📂 Upload CSV"])
+
+        with source_tab:
+            pasted = st.text_area(
+                "Paste Slack messages, Jira JSON, or any text signal here",
+                height=120,
+                placeholder='{ "summary": "Invoice reconciliation takes 3 days...", "description": "..." }',
+                key="signal_paste",
+            )
+            if st.button("🔍 Parse Signal", key="parse_signal"):
+                if pasted.strip():
+                    sig = SignalIngester.auto_detect(pasted.strip())
+                    st.session_state.signal = sig
+                    if not st.session_state.idea_title.strip():
+                        st.session_state.idea_title = sig.suggested_title
+                    if not st.session_state.idea_description.strip():
+                        st.session_state.idea_description = sig.suggested_description
+                    st.rerun()
+
+        with upload_tab:
+            uploaded = st.file_uploader("Upload ERP/system CSV export", type=["csv", "txt"], key="signal_csv")
+            if uploaded and st.button("🔍 Parse CSV", key="parse_csv"):
+                sig = SignalIngester.from_csv(uploaded.read(), filename=uploaded.name)
+                st.session_state.signal = sig
+                if not st.session_state.idea_title.strip():
+                    st.session_state.idea_title = sig.suggested_title
+                if not st.session_state.idea_description.strip():
+                    st.session_state.idea_description = sig.suggested_description
+                st.rerun()
+
+        sig = st.session_state.get("signal")
+        if sig:
+            conf_color = {"high": "🟢", "medium": "🟡", "low": "🔴"}.get(sig.confidence, "⚪")
+            st.markdown(
+                f'<div style="background:#f0fdf4;border:1px solid #86efac;border-radius:8px;'
+                f'padding:10px 14px;font-size:12px;color:#14532d;margin-top:8px">'
+                f'<strong>{conf_color} Signal parsed</strong> · Source: <code>{sig.source_type}</code> · '
+                f'Domain hint: <strong>{sig.detected_domain}</strong><br/>'
+                + ("".join(f"<div>• {s[:120]}</div>" for s in sig.signals[:4]))
+                + (f"<div style='margin-top:4px;color:#64748b'>{len(sig.warnings)} warning(s)</div>" if sig.warnings else "")
+                + "</div>",
+                unsafe_allow_html=True,
+            )
+            if sig.metrics:
+                st.caption("📊 Detected metrics: " + " · ".join(
+                    f"{m['name']}: {m['value']} {m['unit']}" for m in sig.metrics[:4]
+                ))
+
     col1, col2 = st.columns([3, 1])
     with col2:
         if st.button("Start Evaluation →", type="primary", use_container_width=True):
@@ -612,6 +667,12 @@ def screen_idea_input():
 # ------------------------------------------------------------------ #
 
 def screen_origin():
+    """
+    SCREEN: Origin Pre-Question (Q0)
+    Asks where the idea came from (user reports, PM hypothesis, usage data, etc.).
+    The selected option sets an origin_multiplier that scales the final score.
+    High-external-validation origins boost the score; internal hypotheses reduce it.
+    """
     progress_bar("origin")
     st.markdown("### Before we evaluate — where did this idea come from?")
     st.caption("This shapes how much weight we give the signal behind your idea.")
@@ -653,6 +714,12 @@ def screen_origin():
 # ------------------------------------------------------------------ #
 
 def screen_q1():
+    """
+    SCREEN: Q1 — Supply chain domain selection.
+    Filters out WIP domains. Pre-selects the user's most-evaluated domain at Phase 1+.
+    Shows a 'similar ideas' notice if the user has prior ideas in the same domain.
+    Answer drives Q2's adaptive branching (domain-specific problems).
+    """
     progress_bar("q1")
     engine  = st.session_state.engine
     ucm     = st.session_state.get("ucm")
@@ -710,6 +777,12 @@ def screen_q1():
 # ------------------------------------------------------------------ #
 
 def screen_q2():
+    """
+    SCREEN: Q2 — Problem type (adaptive on Q1 domain answer).
+    Shows domain-filtered problem options. Provides a free-text field when
+    'other' is selected. Problem answer drives problem-specific interview questions,
+    data signals, and success criteria in the Research Plan.
+    """
     progress_bar("q2")
     engine       = st.session_state.engine
     q            = engine.get_question("q2")
@@ -752,6 +825,11 @@ def screen_q2():
 # ------------------------------------------------------------------ #
 
 def screen_q3():
+    """
+    SCREEN: Q3 — Primary stakeholder selection.
+    Options are reordered by domain relevance (most likely role first).
+    The selected stakeholder is used in the hypothesis and participant list.
+    """
     progress_bar("q3")
     engine = st.session_state.engine
     q      = engine.get_question("q3")
@@ -789,6 +867,12 @@ def screen_q3():
 # ------------------------------------------------------------------ #
 
 def screen_q4():
+    """
+    SCREEN: Q4 — Current state / market gap.
+    Captures how the problem is handled today (spreadsheets, legacy ERP, competitor, etc.).
+    Drives the market_gap dimension score and the McKinsey Horizon classification.
+    Also feeds WSJF duration proxy in the scoring engine.
+    """
     progress_bar("q4")
     engine = st.session_state.engine
     q      = engine.get_question("q4")
@@ -826,6 +910,12 @@ def screen_q4():
 # ------------------------------------------------------------------ #
 
 def screen_q5():
+    """
+    SCREEN: Q5 — Three-factor business impact rating.
+    Collects: frequency of the problem, severity of its impact, and workaround effort.
+    Also includes an optional free-text cost estimate field.
+    On submit, calls ScoringEngine.compute() and stores the VerdictResult in session state.
+    """
     progress_bar("q5")
     engine  = st.session_state.engine
     q       = engine.get_question("q5")
@@ -895,6 +985,14 @@ def screen_q5():
 # ------------------------------------------------------------------ #
 
 def screen_verdict():
+    """
+    SCREEN: Verdict
+    Displays the score circle, band card, Stage-Gate recommendation, score breakdown
+    (expandable), confidence flags, JTBD problem statement, McKinsey 3 Horizons
+    classification, benchmark percentile, cost estimate, framework metrics
+    (SCOR/WSJF/ODI), and the Domain Knowledge Audit section (7 patterns).
+    Records the idea to ucm on first arrival. Unlocks Research Plan when score ≥ threshold.
+    """
     verdict = st.session_state.verdict
     if not verdict:
         go("idea_input")
@@ -1349,6 +1447,68 @@ def screen_verdict():
             for i, item in enumerate(audit.action_items[:6], 1):
                 st.markdown(f"{i}. {item}")
 
+
+    # ── Phase 4: Ideas Like This ─────────────────────────────────────
+    _engine  = st.session_state.engine
+    _domain  = _engine.answers.get("q1", "")
+    _problem = _engine.answers.get("q2", "")
+    if _domain:
+        _similar = IdeasLikeThis().find(
+            current_domain=_domain,
+            current_score=verdict.final_score,
+            current_title=st.session_state.idea_title,
+            current_description=st.session_state.idea_description,
+            current_problem=_problem,
+            top_n=3,
+        )
+        _pattern_msg = IdeasLikeThis().get_pattern_summary(_domain, verdict.final_score)
+        if _similar or _pattern_msg:
+            with st.expander(
+                "🔎 Ideas Like This (" + str(len(_similar)) + " similar in your history)",
+                expanded=False,
+            ):
+                if _pattern_msg:
+                    st.info(_pattern_msg)
+                for _s in _similar:
+                    _outcome_tag = f" · _{_s.outcome}_" if _s.outcome else ""
+                    _deep_tag    = " · 🔬 deep-dived" if _s.deep_dive else ""
+                    st.markdown(
+                        '<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;'
+                        'padding:10px 14px;margin-bottom:8px;font-size:13px">'
+                        + f"<strong>{_s.title}</strong> &nbsp; "
+                        + f'<span style="color:#6366f1;font-weight:700">{int(_s.score)}/100</span> · '
+                        + f'<span style="color:#64748b">{_s.band_label}</span> · '
+                        + f'<span style="color:#94a3b8">{_s.date}</span>{_outcome_tag}{_deep_tag}<br/>'
+                        + f'<span style="font-size:11px;color:#9ca3af">'
+                        + f'Similarity: {_s.similarity_score:.0%} — {_s.similarity_reason}</span>'
+                        + '</div>',
+                        unsafe_allow_html=True,
+                    )
+
+    # ── Phase 4: DMAIC Mode ────────────────────────────────────────────
+    with st.expander("📐 Frame as DMAIC problem", expanded=False):
+        st.caption("Generate a Define / Measure / Analyze / Improve / Control canvas from your Q1–Q5 answers.")
+        if st.button("🔨 Build DMAIC Canvas", key="build_dmaic"):
+            _canvas = DMAICEngine().build(
+                answers=st.session_state.engine.answers,
+                idea_title=st.session_state.idea_title,
+                idea_description=st.session_state.idea_description,
+                research_plan=st.session_state.get("research_plan"),
+                verdict_score=verdict.final_score,
+            )
+            st.session_state.dmaic_canvas = _canvas
+            st.rerun()
+        if st.session_state.get("dmaic_canvas"):
+            st.success("✅ DMAIC canvas built — view it on the Idea Card screen.")
+            st.download_button(
+                "📄 Download DMAIC Canvas (.md)",
+                data=st.session_state.dmaic_canvas.to_markdown(),
+                file_name="dmaic_canvas.md",
+                mime="text/markdown",
+                use_container_width=True,
+                key="dl_dmaic_verdict",
+            )
+
     # ── Final navigation ──
     st.divider()
     col1, col2 = st.columns(2)
@@ -1363,9 +1523,6 @@ def screen_verdict():
         else:
             st.info(f"Score {verdict.deep_think_threshold}+ unlocks the Research Plan. Your score: {verdict.percent}.")
 
-# ------------------------------------------------------------------ #
-# SCREEN: Research Plan  (tabbed layout)
-# ------------------------------------------------------------------ #
 
 def screen_research_plan():
     verdict = st.session_state.verdict
@@ -1612,7 +1769,13 @@ def screen_research_plan():
 # SCREEN: Research Findings
 # ------------------------------------------------------------------ #
 
+
+# ------------------------------------------------------------------ #
+# SCREEN: Research Findings (Phase 5: Action Tracker)
+# ------------------------------------------------------------------ #
+
 def screen_findings():
+    """Research findings + Phase 5 Action Tracker."""
     st.markdown("## 📝 Log Research Findings")
     st.caption("Log what you learned. Minimum 1 finding unlocks the Idea Card.")
 
@@ -1620,7 +1783,7 @@ def screen_findings():
         st.session_state.findings[i] = st.text_area(
             f"Finding {i+1}",
             value=st.session_state.findings[i],
-            placeholder=f"e.g. 4 of 5 interviewees confirmed this problem occurs daily and takes 2+ hrs each time.",
+            placeholder="e.g. 4 of 5 interviewees confirmed this problem occurs daily and takes 2+ hrs each time.",
             height=68,
             key=f"finding_{i}",
         )
@@ -1633,12 +1796,78 @@ def screen_findings():
         height=80,
     )
 
+    # ── Phase 5: Research Plan Action Tracker ────────────────────────
+    _plan       = st.session_state.get("research_plan") or {}
+    _verdict    = st.session_state.get("verdict")
+    _idea_title = st.session_state.idea_title
+    _tracker    = ActionTracker()
+
+    with st.expander("🗂️ Research Action Tracker", expanded=True):
+        if not st.session_state.actions_seeded and _plan and _verdict:
+            import uuid as _uuid
+            _seeded = ActionTracker.scaffold_from_plan(
+                idea_title=_idea_title,
+                research_plan=_plan,
+                verdict_next_steps=_verdict.next_steps if _verdict else [],
+            )
+            for _item in _seeded:
+                _tracker.add(_item)
+            st.session_state.actions_seeded = True
+
+        _actions = _tracker.get_for_idea(_idea_title)
+        _summary = _tracker.summary_for_idea(_idea_title)
+
+        if _summary["total"] > 0:
+            st.progress(_summary["pct_done"] / 100,
+                        text=f"{_summary['done']}/{_summary['total']} actions done ({_summary['pct_done']}%)")
+            if _summary.get("overdue", 0):
+                st.warning(f"⚠️ {_summary['overdue']} overdue action(s)")
+
+        for _action in _actions:
+            _ac1, _ac2, _ac3 = st.columns([5, 2, 1])
+            with _ac1:
+                _done_icon = "✅" if _action.is_done else _action.priority_icon
+                st.markdown(
+                    f"{_done_icon} **{_action.title}** "
+                    f'<span style="font-size:11px;color:#94a3b8">{_action.source_label}</span>',
+                    unsafe_allow_html=True,
+                )
+            with _ac2:
+                _new_status = st.selectbox(
+                    "Status", ACTION_STATUSES,
+                    index=ACTION_STATUSES.index(_action.status) if _action.status in ACTION_STATUSES else 0,
+                    key=f"act_status_{_action.id}",
+                    label_visibility="collapsed",
+                )
+                if _new_status != _action.status:
+                    _tracker.update_status(_action.id, _new_status)
+                    st.rerun()
+            with _ac3:
+                if st.button("🗑️", key=f"del_act_{_action.id}", help="Remove"):
+                    _tracker.delete(_action.id)
+                    st.rerun()
+
+        with st.form(key="add_action_form", clear_on_submit=True):
+            _new_title    = st.text_input("Add a custom action",
+                                          placeholder="e.g. Schedule interview with SC planners")
+            _new_priority = st.selectbox("Priority", ["High", "Medium", "Low"], index=1)
+            if st.form_submit_button("➕ Add"):
+                if _new_title.strip():
+                    import uuid as _uuid2
+                    _tracker.add(ActionItem(
+                        id=str(_uuid2.uuid4())[:8],
+                        idea_title=_idea_title,
+                        title=_new_title.strip(),
+                        source="manual",
+                        priority=_new_priority,
+                    ))
+                    st.rerun()
+
     generator = IdeaCardGenerator()
     can_generate, gate_msg = generator.check_gate(
         st.session_state.checked_criteria,
         st.session_state.findings,
     )
-
     if can_generate:
         st.success(f"✅ {gate_msg}")
     else:
@@ -1649,17 +1878,17 @@ def screen_findings():
         if st.button("← Back to Research Plan", use_container_width=True):
             go("research_plan")
     with col2:
-        if st.button(
-            "Generate Idea Card →", type="primary",
-            disabled=not can_generate, use_container_width=True,
-        ):
+        if st.button("Generate Idea Card →", type="primary",
+                     disabled=not can_generate, use_container_width=True):
             go("idea_card")
 
+
 # ------------------------------------------------------------------ #
-# SCREEN: Idea Card
+# SCREEN: Idea Card (Phase 4 & 5: BRM, DMAIC, Integrations, Team)
 # ------------------------------------------------------------------ #
 
 def screen_idea_card():
+    """Idea Card with tabbed Phase 4 & 5 panels."""
     verdict   = st.session_state.verdict
     engine    = st.session_state.engine
     plan      = st.session_state.research_plan or {}
@@ -1675,11 +1904,11 @@ def screen_idea_card():
         proposed_direction=st.session_state.proposed_direction,
     )
     st.session_state.idea_card = card
+    card_dict = card.to_dict()
 
     st.markdown("## 🃏 Idea Card")
-
     st.markdown(
-        f"""<div class="idea-card-header">
+        f'''<div class="idea-card-header">
             <div style="display:flex;justify-content:space-between;align-items:flex-start">
                 <div>
                     <div style="font-size:18px;font-weight:700;margin-bottom:4px">{card.title}</div>
@@ -1691,90 +1920,312 @@ def screen_idea_card():
                 </div>
             </div>
             <div style="font-size:13px;margin-top:10px;opacity:0.9">{card.description}</div>
-        </div>""",
+        </div>''',
         unsafe_allow_html=True,
     )
 
-    st.markdown('<div class="idea-card-body">', unsafe_allow_html=True)
+    tab_card, tab_brm, tab_dmaic, tab_int, tab_team = st.tabs([
+        "🃏 Idea Card", "📈 BRM Outcomes", "📐 DMAIC", "🔗 Integrations", "👥 Team"
+    ])
 
-    col1, col2 = st.columns(2)
-    with col1:
-        st.markdown("**Problem Statement**")
-        st.markdown(card.problem)
-        st.markdown("**Current State**")
-        st.markdown(card.current_state)
-    with col2:
-        st.markdown("**Primary User**")
-        st.markdown(card.primary_stakeholder)
-        st.markdown("**Proposed Direction**")
-        st.markdown(card.proposed_direction or "*(not yet defined)*")
+    # ── Tab 1: Idea Card ───────────────────────────────────────────────
+    with tab_card:
+        st.markdown('<div class="idea-card-body">', unsafe_allow_html=True)
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("**Problem Statement**"); st.markdown(card.problem)
+            st.markdown("**Current State**");     st.markdown(card.current_state)
+        with col2:
+            st.markdown("**Primary User**");         st.markdown(card.primary_stakeholder)
+            st.markdown("**Proposed Direction**");    st.markdown(card.proposed_direction or "*(not yet defined)*")
+        st.divider()
+        st.markdown("**Hypothesis**")
+        st.markdown(f'<div class="hypothesis">{card.hypothesis}</div>', unsafe_allow_html=True)
+        st.divider()
+        col3, col4 = st.columns(2)
+        with col3:
+            st.markdown("**Validated Evidence**")
+            if card.validated_evidence:
+                for e in card.validated_evidence: st.markdown(f"- {e}")
+            else: st.caption("*(no findings logged yet)*")
+        with col4:
+            st.markdown("**Key Adoption Risk**"); st.markdown(card.key_adoption_risk)
+        st.divider()
+        st.markdown("**Open Questions**")
+        for oq in card.open_questions:
+            if oq.strip(): st.markdown(f"- {oq}")
+        st.markdown("**Next Actions**")
+        for na in card.next_actions: st.markdown(f"- ☐ {na}")
+        for flag in card.confidence_flags:
+            if flag: st.warning(flag)
+        st.markdown('</div>', unsafe_allow_html=True)
+        st.divider()
+        ca, cb, cc = st.columns(3)
+        with ca:
+            st.download_button("📄 Export Markdown", data=card.to_markdown(),
+                file_name=f"skout_{card.title[:30].replace(' ','_')}.md", mime="text/markdown",
+                use_container_width=True)
+        with cb:
+            st.download_button("📦 Export JSON", data=json.dumps(card_dict, indent=2),
+                file_name=f"skout_{card.title[:30].replace(' ','_')}.json", mime="application/json",
+                use_container_width=True)
+        with cc:
+            if st.button("🔄 Start New Idea", use_container_width=True):
+                for key in ["verdict","research_plan","findings","checked_criteria","proposed_direction",
+                            "idea_card","idea_title","idea_description","idea_recorded",
+                            "signal","dmaic_canvas","actions_seeded"]:
+                    st.session_state.pop(key, None)
+                st.session_state.engine.reset()
+                init_state()
+                go("idea_input")
 
-    st.divider()
-    st.markdown("**Hypothesis**")
-    st.markdown(f'<div class="hypothesis">{card.hypothesis}</div>', unsafe_allow_html=True)
-    st.divider()
+    # ── Tab 2: BRM Outcomes ───────────────────────────────────────────
+    with tab_brm:
+        st.markdown("### 📈 Benefits Realisation Management")
+        _brm    = BRMTracker()
+        _record = _brm.get_by_title(card.title) or BRMTracker.scaffold_from_card(
+            card.title, card.domain, card.verdict_score, card.next_actions)
 
-    col3, col4 = st.columns(2)
-    with col3:
-        st.markdown("**Validated Evidence**")
-        if card.validated_evidence:
-            for e in card.validated_evidence:
-                st.markdown(f"- {e}")
+        bc1, bc2, bc3 = st.columns(3)
+        with bc1:
+            _ns = st.selectbox("Status", REALISATION_STATUS,
+                index=REALISATION_STATUS.index(_record.status) if _record.status in REALISATION_STATUS else 0,
+                key="brm_status")
+            _record.status = _ns
+        with bc2:
+            _record.go_live_date = st.text_input("Go-live (YYYY-MM-DD)", value=_record.go_live_date or "", key="brm_gl")
+        with bc3:
+            _record.review_date  = st.text_input("Next review (YYYY-MM-DD)", value=_record.review_date or "", key="brm_rv")
+
+        st.divider()
+        st.markdown("#### 💰 Benefits")
+        if not _record.benefits:
+            _record.benefits = [BenefitItem(BENEFIT_CATEGORIES[0], "", 0.0, "%")]
+
+        for _idx, _ben in enumerate(_record.benefits):
+            with st.expander(f"Benefit {_idx+1}: {_ben.category}", expanded=_idx == 0):
+                _bb1, _bb2 = st.columns(2)
+                with _bb1:
+                    _ben.category = st.selectbox("Category", BENEFIT_CATEGORIES,
+                        index=BENEFIT_CATEGORIES.index(_ben.category) if _ben.category in BENEFIT_CATEGORIES else 0,
+                        key=f"bc_{_idx}")
+                    _ben.description = st.text_input("Description", value=_ben.description,
+                        key=f"bd_{_idx}", placeholder="e.g. Reduce exception rate")
+                with _bb2:
+                    _pv, _pu = st.columns(2)
+                    with _pv: _ben.predicted_value = st.number_input("Predicted", value=float(_ben.predicted_value), key=f"bpv_{_idx}", min_value=0.0)
+                    with _pu: _ben.predicted_unit = st.selectbox("Unit", MEASUREMENT_UNITS,
+                        index=MEASUREMENT_UNITS.index(_ben.predicted_unit) if _ben.predicted_unit in MEASUREMENT_UNITS else 0,
+                        key=f"bpu_{_idx}")
+                    _av, _au = st.columns(2)
+                    with _av:
+                        _ar = st.number_input("Actual", value=float(_ben.actual_value or 0), key=f"bav_{_idx}", min_value=0.0)
+                        _ben.actual_value = _ar if _ar > 0 else None
+                    with _au: _ben.actual_unit = st.selectbox("Unit ", MEASUREMENT_UNITS,
+                        index=MEASUREMENT_UNITS.index(_ben.actual_unit) if _ben.actual_unit in MEASUREMENT_UNITS else 0,
+                        key=f"bau_{_idx}")
+                if _ben.realisation_pct is not None:
+                    _pc = _ben.realisation_pct
+                    _col = "#16a34a" if _pc >= 90 else ("#ca8a04" if _pc >= 60 else "#dc2626")
+                    st.markdown(f'<span style="color:{_col};font-weight:700">Realisation: {_pc}%</span>', unsafe_allow_html=True)
+
+        _ba1, _ba2 = st.columns(2)
+        with _ba1:
+            if st.button("➕ Add benefit", key="brm_add"):
+                _record.benefits.append(BenefitItem(BENEFIT_CATEGORIES[0], "", 0.0, "%")); st.rerun()
+        with _ba2:
+            if _record.benefits and st.button("🗑️ Remove last", key="brm_rm"):
+                _record.benefits.pop(); st.rerun()
+
+        st.divider()
+        st.markdown("#### 🏁 Milestones")
+        for _mi, _ms in enumerate(_record.milestones):
+            _mc1, _mc2, _mc3 = st.columns([5, 2, 1])
+            _ms_icon = '✅' if _ms.get('done') else '⬜'
+            with _mc1: st.markdown(f"{_ms_icon} **{_ms['name']}** · due {_ms.get('due','TBD')}")
+            with _mc2:
+                if not _ms.get("done"):
+                    if st.button("Mark done", key=f"ms_{_mi}"):
+                        from datetime import date as _d
+                        _record.milestones[_mi].update({"done": True, "date_done": _d.today().isoformat()})
+                        _brm.upsert(_record); st.rerun()
+            with _mc3:
+                if st.button("🗑️", key=f"msd_{_mi}"):
+                    _record.milestones.pop(_mi); _brm.upsert(_record); st.rerun()
+
+        with st.form("ms_form", clear_on_submit=True):
+            _mn = st.text_input("Milestone", placeholder="e.g. Complete stakeholder interviews")
+            _md = st.text_input("Due (YYYY-MM-DD)", placeholder="2026-07-01")
+            if st.form_submit_button("➕ Add milestone"):
+                if _mn.strip():
+                    _record.milestones.append({"name": _mn.strip(), "due": _md.strip(), "done": False, "date_done": None})
+                    _brm.upsert(_record); st.rerun()
+
+        _record.lessons_learned      = st.text_area("Lessons learned",      value=_record.lessons_learned,      height=70, key="brm_ll")
+        _record.stakeholder_feedback = st.text_area("Stakeholder feedback",  value=_record.stakeholder_feedback,  height=60, key="brm_sf")
+
+        if st.button("💾 Save BRM Record", type="primary"):
+            _brm.upsert(_record); st.success("✅ BRM record saved.")
+
+        _ps = _brm.portfolio_summary()
+        if _ps.get("total", 0) > 1:
+            st.divider(); st.markdown("#### 📊 Portfolio")
+            _p1, _p2, _p3 = st.columns(3)
+            _p1.metric("Tracked", _ps["total"]); _p2.metric("Delivered", _ps.get("delivered_count", 0))
+            if _ps.get("avg_realisation"): _p3.metric("Avg realisation", f"{_ps['avg_realisation']}%")
+
+    # ── Tab 3: DMAIC ──────────────────────────────────────────────────
+    with tab_dmaic:
+        st.markdown("### 📐 DMAIC Canvas")
+        _dmaic = st.session_state.get("dmaic_canvas")
+        if _dmaic is None:
+            st.info("Build the DMAIC canvas from the Verdict screen, or generate it now.")
+            if st.button("🔨 Build DMAIC Canvas", key="dmaic_card"):
+                _dmaic = DMAICEngine().build(
+                    answers=engine.answers, idea_title=card.title,
+                    idea_description=card.description, research_plan=plan,
+                    verdict_score=card.verdict_score)
+                st.session_state.dmaic_canvas = _dmaic; st.rerun()
         else:
-            st.caption("*(no findings logged yet)*")
-    with col4:
-        st.markdown("**Key Adoption Risk**")
-        st.markdown(card.key_adoption_risk)
+            _d_t, _m_t, _a_t, _i_t, _c_t = st.tabs(["D—Define","M—Measure","A—Analyze","I—Improve","C—Control"])
+            with _d_t:
+                for _lbl, _val in [("Problem Statement", _dmaic.problem_statement),
+                                   ("Scope", _dmaic.project_scope),
+                                   ("Voice of Customer", _dmaic.voice_of_customer),
+                                   ("Goal Statement", _dmaic.goal_statement)]:
+                    st.markdown(f"##### {_lbl}"); st.markdown(_val)
+                st.markdown("##### SIPOC")
+                for _k in ["suppliers","inputs","process","outputs","customers"]:
+                    _v = _dmaic.sipoc.get(_k, [])
+                    st.markdown(f"**{_k.title()}:** " + (", ".join(_v) if isinstance(_v, list) else str(_v)))
+            with _m_t:
+                st.markdown("##### Baseline Metrics")
+                for _bm in _dmaic.baseline_metrics: st.markdown(f"- {_bm}")
+                st.markdown("##### Measurement Plan"); st.markdown(_dmaic.measurement_plan)
+            with _a_t:
+                st.markdown("##### Root Cause Categories (Fishbone)")
+                for _cat in _dmaic.root_cause_categories:
+                    with st.expander(_cat):
+                        _hyp = st.text_area("Hypothesis", value=_dmaic.fishbone_branches.get(_cat,""),
+                                            key=f"fish_{_cat[:15]}", height=60)
+                        _dmaic.fishbone_branches[_cat] = _hyp
+                if _dmaic.riskiest_assumption:
+                    st.warning(f"⚠️ Riskiest assumption: {_dmaic.riskiest_assumption}")
+            with _i_t:
+                st.markdown("##### Solution Direction"); st.markdown(_dmaic.solution_direction)
+                st.markdown("##### Quick Wins")
+                for _qw in _dmaic.quick_wins: st.markdown(f"- {_qw}")
+                st.markdown("##### Strategic Changes")
+                for _sc in _dmaic.strategic_changes: st.markdown(f"- {_sc}")
+            with _c_t:
+                st.markdown("##### Success Criteria")
+                for _sc in _dmaic.success_criteria:
+                    _icon = {"Confirmed":"🟢","Quantified":"🔵","Disproved":"🟠","Blocker":"🔴"}.get(_sc.get("type",""),"⚪")
+                    st.markdown(f"- {_icon} **{_sc.get('type','')}** — {_sc.get('criterion','')}")
+                st.markdown("##### Control Plan"); st.markdown(_dmaic.control_plan)
+            st.divider()
+            st.download_button("📄 Download DMAIC (.md)", data=_dmaic.to_markdown(),
+                file_name=f"dmaic_{card.title[:25].replace(' ','_')}.md", mime="text/markdown",
+                use_container_width=True)
 
-    st.divider()
-    st.markdown("**Open Questions for Next Stage**")
-    for oq in card.open_questions:
-        if oq.strip():
-            st.markdown(f"- {oq}")
+    # ── Tab 4: Integrations ───────────────────────────────────────────
+    with tab_int:
+        st.markdown("### 🔗 Export & Integrations")
+        _n_t, _j_t, _w_t, _c_t = st.tabs(["Notion", "Jira", "Webhook", "CSV"])
 
-    st.markdown("**Next Actions**")
-    for na in card.next_actions:
-        st.markdown(f"- ☐ {na}")
+        with _n_t:
+            st.markdown("#### 📝 Notion Markdown Export")
+            _notion_md = to_notion_markdown(card_dict)
+            st.text_area("Notion markdown", value=_notion_md, height=280, key="notion_ta")
+            st.download_button("📥 Download Notion (.md)", data=_notion_md,
+                file_name=f"notion_{card.title[:25].replace(' ','_')}.md", mime="text/markdown",
+                use_container_width=True)
 
-    for flag in card.confidence_flags:
-        if flag:
-            st.warning(flag)
+        with _j_t:
+            st.markdown("#### 🟦 Jira Issue Export")
+            _pk = st.text_input("Jira project key", value="SC", max_chars=10)
+            _jira_json = to_jira_json_str(card_dict, _pk)
+            st.code(_jira_json, language="json")
+            st.download_button("📥 Download Jira JSON", data=_jira_json,
+                file_name=f"jira_{card.title[:25].replace(' ','_')}.json", mime="application/json",
+                use_container_width=True)
+            st.caption("POST to: `POST /rest/api/3/issue`")
 
-    st.markdown("</div>", unsafe_allow_html=True)
+        with _w_t:
+            st.markdown("#### 🌐 Webhook POST")
+            _wurl = st.text_input("Webhook URL", value=st.session_state.get("webhook_url",""),
+                placeholder="https://hooks.zapier.com/hooks/catch/…", key="wh_url_input")
+            st.session_state.webhook_url = _wurl
+            _extra_raw = st.text_input("Extra metadata (key=value)", placeholder="source=skout,env=prod")
+            _extra = {}
+            for _p in _extra_raw.split(","):
+                if "=" in _p:
+                    _k, _v = _p.split("=", 1)
+                    _extra[_k.strip()] = _v.strip()
+            if st.button("🚀 Send to Webhook", type="primary", disabled=not _wurl.strip()):
+                _payload = build_webhook_payload(card_dict, _extra or None)
+                with st.spinner("Sending…"):
+                    _res = post_webhook(_wurl.strip(), _payload)
+                if _res.success:
+                    st.success(f"✅ Delivered — HTTP {_res.status_code}")
+                else:
+                    st.error(f"❌ Failed: {_res.error or _res.status_code}")
+            with st.expander("Preview payload"):
+                st.code(json.dumps(build_webhook_payload(card_dict), indent=2), language="json")
 
-    st.divider()
-    col_a, col_b, col_c = st.columns(3)
-    with col_a:
-        st.download_button(
-            "📄 Export Markdown",
-            data=card.to_markdown(),
-            file_name=f"skout_{card.title[:30].replace(' ','_')}.md",
-            mime="text/markdown",
-            use_container_width=True,
-        )
-    with col_b:
-        st.download_button(
-            "📦 Export JSON",
-            data=json.dumps(card.to_dict(), indent=2),
-            file_name=f"skout_{card.title[:30].replace(' ','_')}.json",
-            mime="application/json",
-            use_container_width=True,
-        )
-    with col_c:
-        if st.button("🔄 Start New Idea", use_container_width=True):
-            for key in ["verdict", "research_plan", "findings", "checked_criteria",
-                        "proposed_direction", "idea_card", "idea_title",
-                        "idea_description", "idea_recorded"]:
-                st.session_state.pop(key, None)
-            st.session_state.engine.reset()
-            init_state()
-            go("idea_input")
+        with _c_t:
+            st.markdown("#### 📊 CSV Export")
+            st.download_button("📥 Download CSV", data=to_csv([card_dict]),
+                file_name=f"skout_{card.title[:20].replace(' ','_')}.csv", mime="text/csv",
+                use_container_width=True)
+
+    # ── Tab 5: Team Mode ──────────────────────────────────────────────
+    with tab_team:
+        st.markdown("### 👥 Team Mode — Shared Idea Pool")
+        _ucm     = st.session_state.get("ucm")
+        _profile = _ucm.get_profile() if _ucm else {}
+        _author  = (_profile.get("name") or "Anonymous") if _profile else "Anonymous"
+        _tid     = st.session_state.get("team_id", "default")
+        _tc1, _tc2 = st.columns([3, 1])
+        with _tc1:
+            _tid_in = st.text_input("Team ID", value=_tid, placeholder="e.g. sc-product-team",
+                help="Anyone sharing the same Team ID can see shared ideas.")
+        with _tc2:
+            if st.button("Apply", key="apply_tid"):
+                st.session_state.team_id = _tid_in.strip() or "default"; st.rerun()
+        _tid = st.session_state.get("team_id", "default")
+
+        if st.button("📤 Share this idea to team pool", type="primary"):
+            _shared = share_to_team(card_dict, author=_author, team_id=_tid)
+            if _shared: st.success(f"✅ Shared to team '{_tid}'!")
+            else: st.info("This idea is already in the team pool.")
+
+        st.divider()
+        st.markdown("#### 🗂️ Shared Ideas")
+        _team_ideas = get_team_ideas(_tid)
+        if not _team_ideas:
+            st.caption("No ideas shared yet. Share one above!")
+        else:
+            for _ti in reversed(_team_ideas):
+                _icon = "🟢" if _ti.get("score",0) >= 80 else "🟡"
+                with st.expander(f"{_icon} {_ti['title']} — {int(_ti.get('score',0))}/100 · {_ti.get('author','')} · {_ti.get('shared_date','')}"):
+                    st.markdown(f"**Domain:** {_ti.get('domain','')} · **Band:** {_ti.get('band','')}")
+                    if _ti.get("hypothesis"): st.markdown(f"*{_ti['hypothesis'][:200]}…*")
+                    if _ti.get("next_actions"): st.markdown("**Actions:** " + " · ".join(_ti["next_actions"][:3]))
+                    for _c in _ti.get("comments", []):
+                        st.markdown(f"💬 **{_c['author']}** ({_c['date']}): {_c['text']}")
+                    with st.form(key=f"cmt_{_ti['title'][:15]}"):
+                        _ctxt = st.text_input("Add comment", key=f"c_{_ti['title'][:12]}")
+                        if st.form_submit_button("Send"):
+                            if _ctxt.strip(): add_team_comment(_ti["title"], _author, _ctxt.strip(), _tid); st.rerun()
+
 
 # ------------------------------------------------------------------ #
 # Sidebar
 # ------------------------------------------------------------------ #
 
 def render_sidebar():
+    """Persistent sidebar with Phase 4/5 indicators."""
     with st.sidebar:
         st.markdown("### 🔭 Product Skout")
 
@@ -1784,11 +2235,8 @@ def render_sidebar():
             name    = profile.get("name", "")
             role    = profile.get("role", "")
             org     = profile.get("organization", {})
-
-            if name:
-                st.markdown(f"**{name}** · {role}")
-            if org.get("type"):
-                st.caption(f"{org.get('type')} · {org.get('size','')}")
+            if name:  st.markdown(f"**{name}** · {role}")
+            if org.get("type"): st.caption(f"{org.get('type')} · {org.get('size','')}")
 
             phase = ucm.get_phase()
             phase_colors = {0: "phase-0", 1: "phase-1", 2: "phase-2", 3: "phase-3"}
@@ -1798,8 +2246,7 @@ def render_sidebar():
                 unsafe_allow_html=True,
             )
             to_next = ucm.ideas_to_next_phase()
-            if to_next > 0:
-                st.caption(f"{to_next} idea(s) to Phase {phase + 1}")
+            if to_next > 0: st.caption(f"{to_next} idea(s) to Phase {phase + 1}")
 
             stats = ucm.get_stats()
             if stats["total"] > 0:
@@ -1818,8 +2265,7 @@ def render_sidebar():
             summary = engine.get_answered_summary()
             if summary:
                 st.markdown("**Answers so far:**")
-                for qid, label in [("origin", "Source"), ("q1", "Domain"),
-                                    ("q2", "Problem"), ("q3", "Stakeholder"), ("q4", "Today")]:
+                for qid, label in [("origin","Source"),("q1","Domain"),("q2","Problem"),("q3","Stakeholder"),("q4","Today")]:
                     if qid in summary and isinstance(summary[qid], str):
                         st.caption(f"**{label}:** {summary[qid]}")
                 if "q5" in summary and isinstance(summary["q5"], dict):
@@ -1848,8 +2294,36 @@ def render_sidebar():
             if st.button("✏️ Edit Profile", use_container_width=True):
                 go("onboarding")
 
+        # ── Phase 4 & 5 indicators ──
+        _sig = st.session_state.get("signal")
+        if _sig:
+            st.markdown("---")
+            _ci = {"high": "🟢", "medium": "🟡", "low": "🔴"}.get(_sig.confidence, "⚪")
+            st.caption(f"{_ci} Signal: `{_sig.source_type}` · domain: **{_sig.detected_domain}**")
+
+        _tid = st.session_state.get("team_id", "default")
+        _tm  = st.session_state.get("team_mode", False)
         st.markdown("---")
-        st.caption("v0.2 · Supply Chain Edition")
+        _new_tm = st.checkbox("👥 Team Mode", value=_tm, key="sb_team")
+        st.session_state.team_mode = _new_tm
+        if _new_tm:
+            st.caption(f"Pool: **{_tid}**")
+            _ti = get_team_ideas(_tid)
+            if _ti: st.caption(f"{len(_ti)} shared idea(s)")
+
+        if st.session_state.get("dmaic_canvas"):
+            st.markdown("---")
+            st.caption("📐 DMAIC canvas ready")
+
+        if st.session_state.idea_title:
+            _at = ActionTracker()
+            _as = _at.summary_for_idea(st.session_state.idea_title)
+            if _as.get("total", 0) > 0:
+                st.caption(f"🗂️ Actions: {_as['done']}/{_as['total']} done ({_as['pct_done']}%)")
+
+        st.markdown("---")
+        st.caption("v0.4 · Supply Chain Edition · Phase 4-5")
+
 
 # ------------------------------------------------------------------ #
 # Router

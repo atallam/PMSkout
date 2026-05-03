@@ -26,6 +26,17 @@ _KNOWLEDGE_DIR = Path(__file__).parent.parent / "domain_knowledge"
 
 @dataclass
 class KnowledgeChunk:
+    """
+    A single unit of retrieved domain knowledge, returned by RAGStore.query().
+
+    Attributes:
+        chunk_id:   Unique identifier (e.g. "scor_planning", "kpi_forecast_accuracy").
+        source:     Human-readable source name (e.g. "SCOR Framework (APICS v12)").
+        category:   Logical category: "scor" / "kpi" / "failure_pattern" / "general".
+        content:    The actual knowledge text (capped at ~800 chars per chunk).
+        keywords:   Searchable keywords used for retrieval scoring.
+        relevance:  Retrieval score in [0, 1]; 0.0 until query() assigns a score.
+    """
     chunk_id: str
     source: str           # filename or logical source name
     category: str         # "scor", "kpi", "failure_pattern", "general"
@@ -34,6 +45,7 @@ class KnowledgeChunk:
     relevance: float = 0.0  # Score assigned during retrieval
 
     def to_dict(self) -> Dict:
+        """Serialise chunk fields (with rounded relevance score) to a plain dict."""
         return {
             "chunk_id": self.chunk_id,
             "source": self.source,
@@ -55,6 +67,13 @@ class RAGStore:
     """
 
     def __init__(self, knowledge_dir: Optional[Path] = None):
+        """
+        Initialise the RAG store. Knowledge files are loaded lazily on the first query().
+
+        Args:
+            knowledge_dir: Override the default domain_knowledge/ directory.
+                           Useful for testing with a custom knowledge base.
+        """
         self._dir = knowledge_dir or _KNOWLEDGE_DIR
         self._chunks: List[KnowledgeChunk] = []
         self._loaded = False

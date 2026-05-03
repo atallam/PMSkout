@@ -13,6 +13,34 @@ from .scoring_engine import VerdictResult
 
 @dataclass
 class IdeaCard:
+    """
+    Structured, shareable idea one-pager generated after research is complete.
+
+    Fields are populated by IdeaCardGenerator.generate() from answers + findings.
+    Export formats: Markdown (to_markdown) and JSON (to_dict).
+
+    Attributes:
+        title:               Idea name entered by the PM.
+        description:         1–2 sentence idea description.
+        domain:              Human-readable supply chain domain label.
+        problem:             Raw Q2 problem id (used as the problem statement key).
+        primary_stakeholder: Human-readable primary stakeholder label.
+        current_state:       Human-readable Q4 current-state label.
+        verdict_score:       Final numeric score (0–100) from ScoringEngine.
+        verdict_label:       Band label (e.g. "High Priority").
+        verdict_emoji:       Band emoji (e.g. "🟢").
+        origin:              Human-readable idea origin label.
+        origin_multiplier:   Multiplier applied to the base score.
+        date_created:        ISO date string (YYYY-MM-DD) when card was generated.
+        hypothesis:          Research plan hypothesis (carried over verbatim).
+        validated_evidence:  List of research findings entered by the PM.
+        key_adoption_risk:   The riskiest assumption from the research plan.
+        proposed_direction:  Free-text solution direction entered by the PM.
+        open_questions:      Domain-specific open questions for next stage.
+        next_actions:        3 recommended next actions from verdict next_steps.
+        research_status:     "not_started" | "in_progress" | "complete".
+        confidence_flags:    List of confidence-flag messages from the verdict.
+    """
     title: str
     description: str
     domain: str
@@ -35,7 +63,12 @@ class IdeaCard:
     confidence_flags: List[str] = field(default_factory=list)
 
     def to_markdown(self) -> str:
-        """Export idea card as Markdown."""
+        """
+        Export the idea card as a Markdown string suitable for download.
+        Sections: header, Problem Statement, Primary User, Current State,
+        Hypothesis, Validated Evidence, Key Adoption Risk, Proposed Direction,
+        Open Questions, Next Actions.
+        """
         lines = [
             f"# {self.title}",
             f"> {self.description}",
@@ -82,6 +115,10 @@ class IdeaCard:
         return "\n".join(lines)
 
     def to_dict(self) -> Dict:
+        """
+        Serialise the idea card to a plain dict for JSON export.
+        All fields are included; confidence_flags is excluded (for clean export).
+        """
         return {
             "title": self.title,
             "description": self.description,

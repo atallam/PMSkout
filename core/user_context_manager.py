@@ -77,6 +77,14 @@ class UserContextManager:
         context_path: str = "config/user_context.yaml",
         ideas_path:   str = "data/ideas.json",
     ):
+        """
+        Set file paths and initialise empty in-memory state.
+        Call load() immediately after construction before reading any values.
+
+        Args:
+            context_path: Path to user_context.yaml (profile, preferences, learning data).
+            ideas_path:   Path to data/ideas.json (idea submission history).
+        """
         self.context_path = Path(context_path)
         self.ideas_path   = Path(ideas_path)
         self._ctx: Dict   = {}
@@ -87,6 +95,13 @@ class UserContextManager:
     # ------------------------------------------------------------------ #
 
     def load(self) -> "UserContextManager":
+        """
+        Load user_context.yaml and ideas.json into memory.
+        Creates data/ directory and an empty ideas.json if they do not yet exist.
+
+        Returns:
+            self — allows chaining: ``ucm = UserContextManager().load()``.
+        """
         if self.context_path.exists():
             with open(self.context_path, encoding="utf-8") as f:
                 self._ctx = yaml.safe_load(f) or {}
@@ -109,6 +124,7 @@ class UserContextManager:
             yaml.dump(self._ctx, f, default_flow_style=False, allow_unicode=True)
 
     def _save_ideas(self) -> None:
+        """Persist the in-memory ideas list to data/ideas.json (pretty-printed JSON)."""
         with open(self.ideas_path, "w", encoding="utf-8") as f:
             json.dump(self._ideas, f, indent=2)
 
@@ -117,10 +133,18 @@ class UserContextManager:
     # ------------------------------------------------------------------ #
 
     def is_onboarded(self) -> bool:
+        """True if the user has completed onboarding (profile has a role or name set)."""
         profile = self._ctx.get("profile", {})
         return bool(profile.get("role") or profile.get("name"))
 
     def get_phase(self) -> int:
+        """
+        Return the user's current personalisation phase (0–3) based on how many
+        ideas they have submitted against the PHASE_THRESHOLDS config.
+
+        Returns:
+            0 = Onboarding, 1 = Learning, 2 = Adapting, 3 = Personalising.
+        """
         n = self._learning("ideas_submitted")
         if n >= PHASE_THRESHOLDS[3]:
             return 3
@@ -131,10 +155,15 @@ class UserContextManager:
         return 0
 
     def phase_label(self) -> str:
+        """Human-readable label for the current personalisation phase."""
         labels = {0: "Onboarding", 1: "Learning", 2: "Adapting", 3: "Personalising"}
         return labels[self.get_phase()]
 
     def ideas_to_next_phase(self) -> int:
+        """
+        Number of additional idea submissions needed to advance to the next phase.
+        Returns 0 when already at Phase 3 (maximum personalisation).
+        """
         phase = self.get_phase()
         if phase == 3:
             return 0
@@ -214,6 +243,13 @@ class UserContextManager:
         self.save()
 
     def record_research_completed(self, methods_used: List[str]) -> None:
+        """
+        Increment the research-completed counter and append newly-used methods
+        to the user's preferred_methods list (avoids duplicates).
+
+        Args:
+            methods_used: List of method names (e.g. ["User Interviews", "Data Pull"]).
+        """
         self._set_learning(
             "research_completed", self._learning("research_completed") + 1
         )
@@ -257,18 +293,28 @@ class UserContextManager:
         return None
 
     def get_custom_data_sources(self) -> List[str]:
+        """Return list of data system names the user connected during onboarding."""
         return (
             self._ctx.get("research_preferences", {}).get("custom_data_sources", [])
             or []
         )
 
     def get_known_stakeholders(self) -> List[Dict]:
+        """
+        Return the user's pre-populated stakeholder roster.
+        Each entry: {role, access_level, notes}.
+        These are injected into research plans as 'Known contact' participants.
+        """
         return (
             self._ctx.get("research_preferences", {}).get("known_stakeholders", [])
             or []
         )
 
     def get_deep_think_threshold(self) -> int:
+        """
+        Return the minimum score required to unlock the Research Plan (default 80).
+        Configurable during onboarding and stored in user_context.yaml.
+        """
         return int(
             self._ctx.get("research_preferences", {}).get(
                 "deep_think_threshold", 80
@@ -277,13 +323,17 @@ class UserContextManager:
         )
 
     def get_scoring_weights(self) -> Optional[Dict]:
-        """Returns custom weights dict if enabled at Phase 2+, else None."""
+        """
+        Return custom dimension-weight overrides if enabled at Phase 2+, else None.
+        Weights are stored under scoring_customization.weights in user_context.yaml.
+        """
         custom = self._ctx.get("scoring_customization", {})
         if custom.get("enabled") and custom.get("weights"):
             return custom["weights"]
         return None
 
     def get_default_interview_count(self) -> int:
+        """Return the default interview target set during onboarding (default 5)."""
         return int(
             self._ctx.get("research_preferences", {}).get(
                 "default_interview_count", 5
@@ -292,15 +342,18 @@ class UserContextManager:
         )
 
     def get_preferred_methods(self) -> List[str]:
+        """Return the user's learned/preferred research methods (built up over time)."""
         return (
             self._ctx.get("research_preferences", {}).get("preferred_methods", [])
             or []
         )
 
     def get_org_context(self) -> Dict:
+        """Return the organisation sub-dict from the user profile {type, size, regions}."""
         return self._ctx.get("profile", {}).get("organization", {})
 
     def get_profile(self) -> Dict:
+        """Return the full user profile dict {id, name, role, organization}."""
         return self._ctx.get("profile", {})
 
     # ------------------------------------------------------------------ #
@@ -405,9 +458,17 @@ class UserContextManager:
     # ------------------------------------------------------------------ #
 
     def get_ideas_history(self) -> List[Dict]:
+        """Return all submitted ideas, most recent first."""
         return list(reversed(self._ideas))   # most recent first
 
     def get_stats(self) -> Dict:
+        """
+        Return aggregate statistics over all submitted ideas.
+
+        Returns:
+            Dict with keys: total, high_priority (score ≥ 80), avg_score,
+            researched (research plans completed), top_domain (most-used domain label).
+        """
         ideas = self._ideas
         if not ideas:
             return {"total": 0, "high_priority": 0, "researched": 0, "top_domain": "—"}
@@ -427,12 +488,23 @@ class UserContextManager:
     # ------------------------------------------------------------------ #
 
     def get_custom_domains(self) -> List[Dict]:
+        """Return the list of user-defined custom domain dicts from custom_extensions.domains."""
         return (
             self._ctx.get("custom_extensions", {}).get("domains", []) or []
         )
 
     def add_custom_domain(self, domain_id: str, label: str, parent: str,
                           description: str = "") -> None:
+        """
+        Register a new custom domain extension and persist to user_context.yaml.
+        Duplicate domain_ids are silently ignored.
+
+        Args:
+            domain_id:   Unique machine-readable ID (e.g. "sustainability").
+            label:       Human-readable display name (e.g. "Sustainability & ESG").
+            parent:      Parent SCOR domain this extends (e.g. "planning").
+            description: Optional short description shown in the UI.
+        """
         exts = self._ctx.setdefault("custom_extensions", {})
         domains = exts.setdefault("domains", [])
         # Avoid duplicates
@@ -447,6 +519,15 @@ class UserContextManager:
 
     def add_known_stakeholder(self, role: str, access_level: str = "medium",
                               notes: str = "") -> None:
+        """
+        Add a stakeholder the user has interview access to and persist to YAML.
+        Duplicate roles (case-insensitive) are silently ignored.
+
+        Args:
+            role:         Stakeholder job title or role (e.g. "VP of Supply Chain").
+            access_level: How easily the PM can reach this person: "high" / "medium" / "low".
+            notes:        Optional free-text notes (e.g. "prefers async comms").
+        """
         prefs = self._ctx.setdefault("research_preferences", {})
         stakeholders = prefs.setdefault("known_stakeholders", [])
         if not any(s.get("role", "").lower() == role.lower() for s in stakeholders):
@@ -469,16 +550,20 @@ class UserContextManager:
     # ------------------------------------------------------------------ #
 
     def _learning(self, key: str) -> Any:
+        """Read a scalar value from learning_data (returns 0 if absent)."""
         return self._ctx.get("learning_data", {}).get(key, 0)
 
     def _learning_dict(self, key: str) -> Dict:
+        """Read a dict value from learning_data (returns {} if absent or non-dict)."""
         val = self._ctx.get("learning_data", {}).get(key, {})
         return val if isinstance(val, dict) else {}
 
     def _set_learning(self, key: str, value: Any) -> None:
+        """Write a value into the learning_data section of context (in-memory only)."""
         self._ctx.setdefault("learning_data", {})[key] = value
 
     def _top_domain(self) -> Optional[str]:
+        """Return the most frequently evaluated domain, or None if no history exists."""
         dh = self._learning_dict("domain_history")
         if not dh:
             return None
