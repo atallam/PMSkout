@@ -130,6 +130,65 @@ class VerdictResult:
         return getattr(self, "_q5_factors", {})
 
 
+    def to_dict(self) -> Dict:
+        """Serialize to a plain JSON-safe dict for persistence."""
+        return {
+            "base_score":          self.base_score,
+            "final_score":         self.final_score,
+            "origin_multiplier":   self.origin_multiplier,
+            "band":                self.band,
+            "band_label":          self.band_label,
+            "band_emoji":          self.band_emoji,
+            "band_color":          self.band_color,
+            "action":              self.action,
+            "headline":            self.headline,
+            "message":             self.message,
+            "next_steps":          list(self.next_steps),
+            "dimension_scores":    dict(self.dimension_scores),
+            "dimension_max":       dict(self.dimension_max),
+            "confidence_flags":    list(self.confidence_flags),
+            "is_wip_domain":       self.is_wip_domain,
+            "deep_dive_unlocked":  self.deep_dive_unlocked,
+            "deep_think_threshold": self.deep_think_threshold,
+            "scor_category":       self.scor_category,
+            "scor_icon":           self.scor_icon,
+            "scor_description":    self.scor_description,
+            "wsjf_score":          self.wsjf_score,
+            "opportunity_gap":     self.opportunity_gap,
+            "q5_factors":          self.q5_factor_scores,
+        }
+
+    @classmethod
+    def from_dict(cls, d: Dict) -> "VerdictResult":
+        """Reconstruct a VerdictResult from a persisted dict."""
+        obj = cls(
+            base_score=float(d.get("base_score", 0)),
+            final_score=float(d.get("final_score", 0)),
+            origin_multiplier=float(d.get("origin_multiplier", 1.0)),
+            band=d.get("band", ""),
+            band_label=d.get("band_label", ""),
+            band_emoji=d.get("band_emoji", ""),
+            band_color=d.get("band_color", "#6b7280"),
+            action=d.get("action", ""),
+            headline=d.get("headline", ""),
+            message=d.get("message", ""),
+            next_steps=list(d.get("next_steps", [])),
+            dimension_scores={k: float(v) for k, v in d.get("dimension_scores", {}).items()},
+            dimension_max={k: int(v) for k, v in d.get("dimension_max", {}).items()},
+            confidence_flags=list(d.get("confidence_flags", [])),
+            is_wip_domain=bool(d.get("is_wip_domain", False)),
+            deep_dive_unlocked=bool(d.get("deep_dive_unlocked", False)),
+            deep_think_threshold=int(d.get("deep_think_threshold", 80)),
+            scor_category=d.get("scor_category", ""),
+            scor_icon=d.get("scor_icon", ""),
+            scor_description=d.get("scor_description", ""),
+            wsjf_score=float(d.get("wsjf_score", 0.0)),
+            opportunity_gap=float(d.get("opportunity_gap", 0.0)),
+        )
+        obj._q5_factors = dict(d.get("q5_factors", {}))
+        return obj
+
+
 class ScoringEngine:
     """Computes verdict score from QuestionEngine answers."""
 

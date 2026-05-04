@@ -43,6 +43,7 @@ from core.integrations import (
     build_webhook_payload, post_webhook,
     get_team_ideas, share_to_team, add_team_comment,
 )
+from core.team_manager import TeamManager
 from core.domain_knowledge_engine import DomainKnowledgeEngine
 
 # ------------------------------------------------------------------ #
@@ -461,6 +462,480 @@ _GATE_RECOMMENDATIONS = {
     "not_ready":     ("🔴 Gate 1: Shelve — Insufficient Signal", "#fef2f2", "#b91c1c", "#f87171"),
 }
 
+# ── Org-level Domain Audit configuration (predefined — not editable by team) ──
+ORG_AUDIT_CONFIG = {
+    "industry":                "electronics",
+    "supply_chain_maturity":   "optimised",
+    "disruption_environment":  "stable",
+    "demand_pattern_primary":  "lumpy",          # Most constraining of the three patterns
+    "demand_patterns_display": ["Trigger-driven", "Seasonal", "Lumpy"],
+}
+
+
+def _get_deep_dive_prompts(verdict, engine, audit=None):
+    """
+    Generate concise, data-driven deep-dive prompts across 6 strategic angles.
+    2 prompts per angle, each 2-3 sentences and copy-paste ready.
+    Uses actual verdict dimensions, scores, and audit findings — no hardcoded industry names.
+    Returns an OrderedDict of angle_label -> list[str].
+    """
+    from collections import OrderedDict
+
+    title  = st.session_state.get("idea_title", "this idea")
+    domain = engine.answers.get("q1", "") if engine else ""
+    score  = verdict.percent
+    band   = verdict.band
+    scor   = verdict.scor_category
+    wsjf   = verdict.wsjf_score
+    opp    = verdict.opportunity_gap
+
+    idea_ref   = f'"{title}"' if title else "this idea"
+    demand_str = " / ".join(ORG_AUDIT_CONFIG["demand_patterns_display"])
+
+    band_label = {
+        "high_priority": "high-priority",
+        "promising":     "promising but unvalidated",
+        "needs_clarity": "needs further clarity",
+        "not_ready":     "not yet ready to progress",
+    }.get(band, "evaluated")
+
+    # ── Find weakest and strongest scoring dimensions ──
+    _dim_labels = {
+        "business_impact":   "business impact",
+        "problem_clarity":   "problem clarity",
+        "market_gap":        "market gap / competitive context",
+        "stakeholder_reach": "stakeholder reach",
+        "domain_fit":        "domain fit",
+    }
+    weakest_label, weakest_pct = "problem definition", 50
+    strongest_label, strongest_pct = "domain fit", 50
+    for dim, dim_score in verdict.dimension_scores.items():
+        max_pts = verdict.dimension_max.get(dim, 30)
+        pct = int((dim_score / max_pts) * 100) if max_pts else 0
+        if pct < weakest_pct:
+            weakest_pct, weakest_label = pct, _dim_labels.get(dim, dim)
+        if pct > strongest_pct:
+            strongest_pct, strongest_label = pct, _dim_labels.get(dim, dim)
+
+    # ── Pull top audit signals (if available) ──
+    top_challenge = ""
+    top_kpi_warn  = ""
+    if audit:
+        if getattr(audit, "challenges", None):
+            top_challenge = audit.challenges[0].name
+        if getattr(audit, "kpi_warnings", None):
+            top_kpi_warn = audit.kpi_warnings[0].kpi_name
+
+    prompts = OrderedDict()
+
+    # ── 1. Strategic ──────────────────────────────────────────────────
+    prompts["🎯 Strategic"] = [
+        f"I'm evaluating {idea_ref}, a supply chain initiative scored {score}/100 ({band_label}). "
+        f"Its weakest dimension is {weakest_label} ({weakest_pct}%) and strongest is {strongest_label} ({strongest_pct}%). "
+        f"Identify the 3 most critical strategic assumptions that must hold for this idea to succeed, "
+        f"and design a 2-week validation sprint to test each one.",
+
+        f"Position {idea_ref} using the McKinsey 3 Horizons model. "
+        f"Its SCOR alignment is '{scor}', WSJF urgency {wsjf:.1f}/10, and Opportunity Gap {opp:.1f}/20. "
+        f"Where does it sit today, what would move it from H1 to H2, and what single strategic decision "
+        f"is the unlock?",
+    ]
+
+    # ── 2. Operational ───────────────────────────────────────────────
+    prompts["⚙️ Operational"] = [
+        f"Map the SCOR process changes required to implement {idea_ref} (aligned to: {scor}). "
+        f"For each affected SCOR domain, specify: current-state pain → target-state change → "
+        f"integration dependency → accountable owner. "
+        f"Account for {demand_str} demand variability throughout.",
+
+        f"Design a 90-day implementation roadmap for {idea_ref}. "
+        f"Week 1–4: discovery and stakeholder alignment; Week 5–8: controlled pilot; Week 9–12: go-live and handoff. "
+        f"Flag the top 3 dependencies that would break this timeline and what the contingency is for each.",
+    ]
+
+    # ── 3. Risk ──────────────────────────────────────────────────────
+    if top_challenge:
+        risk_p1 = (
+            f"The domain audit flagged '{top_challenge}' as the top risk for {idea_ref}. "
+            f"Conduct a 5-Whys root cause analysis on this failure mode. "
+            f"For each root cause, specify a preventive control and an early warning KPI, "
+            f"and rate residual risk as CRITICAL / HIGH / MEDIUM after controls are in place."
+        )
+    else:
+        risk_p1 = (
+            f"Conduct a FMEA-style risk assessment for {idea_ref} (score: {score}/100, {band_label}). "
+            f"List the top 5 failure modes, score each on Severity × Occurrence × Detection (1–10), "
+            f"and recommend one specific mitigation for the highest-RPN item."
+        )
+
+    prompts["⚠️ Risk"] = [
+        risk_p1,
+        f"Stress-test {idea_ref} against three demand scenarios: "
+        f"(1) sudden spike in trigger-driven mode, "
+        f"(2) seasonal trough following peak build-up, "
+        f"(3) extended lumpy-demand gap with near-zero orders for 60 days. "
+        f"For each, identify what breaks first and what buffer, flex capacity, or policy change prevents a failure.",
+    ]
+
+    # ── 4. Financial ─────────────────────────────────────────────────
+    if top_kpi_warn:
+        fin_p1 = (
+            f"The domain audit flagged a KPI gap: '{top_kpi_warn}'. "
+            f"Quantify the annual value of closing this gap through {idea_ref}. "
+            f"Build a best / base / downside sensitivity table with the top 2 value drivers as axes."
+        )
+    else:
+        fin_p1 = (
+            f"Build a one-page business case for {idea_ref} (Opportunity Gap: {opp:.1f}/20, WSJF: {wsjf:.1f}/10). "
+            f"Include: cost-of-delay per quarter if shelved, one-time investment buckets, "
+            f"recurring cost savings or revenue uplift, and target payback period."
+        )
+
+    prompts["💰 Financial"] = [
+        fin_p1,
+        f"Rank {idea_ref} against 3 competing initiatives using WSJF (its current score: {wsjf:.1f}/10). "
+        f"For each competitor initiative, estimate Cost of Delay and job size, then stack-rank all four. "
+        f"What specifically would need to change — scope, timing, or value — "
+        f"to move {idea_ref} to the top of the backlog?",
+    ]
+
+    # ── 5. Technical ─────────────────────────────────────────────────
+    prompts["🔧 Technical"] = [
+        f"Define the minimum data architecture to run {idea_ref} in production. "
+        f"Specify: required source systems, data refresh cadence, quality SLAs, "
+        f"and the single most likely data gap that would stall rollout. "
+        f"If AI/ML is involved, include model drift monitoring and retraining cadence.",
+
+        f"Evaluate build vs. buy vs. partner for {idea_ref} in a {domain or 'supply chain'} context. "
+        f"Compare 3 existing market solutions on fit, integration complexity, and TCO. "
+        f"Recommend a decision with a 12-month delivery plan and name the top 2 technical risks.",
+    ]
+
+    # ── 6. Stakeholder ───────────────────────────────────────────────
+    prompts["👥 Stakeholder"] = [
+        f"Map the power/interest grid for {idea_ref}. "
+        f"For each quadrant (high power/high interest through to low/low), write a one-paragraph "
+        f"engagement strategy and identify the single most likely source of resistance with a pre-emption tactic.",
+
+        f"Write a 3-minute verbal pitch for {idea_ref} (score: {score}/100) targeting a VP of Supply Chain. "
+        f"Structure: hook (cost of the problem) → solution → 3 metrics that prove value → specific ask. "
+        f"End with the one objection they will definitely raise and your prepared response.",
+    ]
+
+    return prompts
+
+
+# ------------------------------------------------------------------ #
+# VERDICT SCREEN HELPERS
+# ------------------------------------------------------------------ #
+
+def _build_decision(verdict) -> dict:
+    """
+    Map verdict band to a GO / REFINE / STOP decision with a rationale.
+    Returns dict: label, emoji, color, bg, rationale.
+    """
+    dim_labels = {
+        "business_impact":   "business impact",
+        "problem_clarity":   "problem clarity",
+        "market_gap":        "market gap",
+        "stakeholder_reach": "stakeholder reach",
+        "domain_fit":        "domain fit",
+    }
+    # Find weakest and strongest dimension
+    weakest_label, weakest_pct  = "problem definition", 50
+    strongest_label, strongest_pct = "domain fit", 50
+    for dim, score in verdict.dimension_scores.items():
+        max_pts = verdict.dimension_max.get(dim, 30)
+        pct = int((score / max_pts) * 100) if max_pts else 0
+        if pct < weakest_pct:
+            weakest_pct, weakest_label = pct, dim_labels.get(dim, dim)
+        if pct > strongest_pct:
+            strongest_pct, strongest_label = pct, dim_labels.get(dim, dim)
+
+    band = verdict.band
+    score = verdict.percent
+
+    if band == "high_priority":
+        return {
+            "label": "GO",
+            "emoji": "🟢",
+            "color": "#15803d",
+            "bg":    "#f0fdf4",
+            "border": "#86efac",
+            "rationale": (
+                f"This idea scored **{score}/100** with strong {strongest_label} ({strongest_pct}%). "
+                f"Signal is sufficient to move to scoping — prioritise strengthening {weakest_label} "
+                f"({weakest_pct}%) as you define the build."
+            ),
+        }
+    elif band == "promising":
+        return {
+            "label": "REFINE",
+            "emoji": "🟡",
+            "color": "#b45309",
+            "bg":    "#fefce8",
+            "border": "#fbbf24",
+            "rationale": (
+                f"Scored **{score}/100** — promising but not ready to commit. "
+                f"{strongest_label.capitalize()} ({strongest_pct}%) is your strongest asset, "
+                f"but {weakest_label} ({weakest_pct}%) needs validation before the idea earns a scoping slot."
+            ),
+        }
+    elif band == "needs_clarity":
+        return {
+            "label": "REFINE",
+            "emoji": "🟠",
+            "color": "#c2410c",
+            "bg":    "#fff7ed",
+            "border": "#fb923c",
+            "rationale": (
+                f"Scored **{score}/100** — key gaps are blocking progress. "
+                f"{weakest_label.capitalize()} ({weakest_pct}%) and {strongest_label} ({strongest_pct}%) "
+                f"show a wide spread; close the gap on the weaker dimension before re-evaluating."
+            ),
+        }
+    else:  # not_ready
+        return {
+            "label": "STOP",
+            "emoji": "🔴",
+            "color": "#b91c1c",
+            "bg":    "#fef2f2",
+            "border": "#fca5a5",
+            "rationale": (
+                f"Scored **{score}/100** — insufficient signal to proceed. "
+                f"Revisit the problem framing; {weakest_label} ({weakest_pct}%) suggests the hypothesis "
+                f"needs rethinking before any investment."
+            ),
+        }
+
+
+def _build_stress_test(verdict, engine, audit=None) -> list:
+    """
+    Return a list of dicts, one per weak dimension (below 65 pct).
+    Each dict: dimension, pct, question, ai_prompt.
+    Max 4 items; always includes at least 2 even if dimensions are strong.
+    """
+    dim_labels = {
+        "business_impact":   "Business Impact",
+        "problem_clarity":   "Problem Clarity",
+        "market_gap":        "Market Gap",
+        "stakeholder_reach": "Stakeholder Reach",
+        "domain_fit":        "Domain Fit",
+    }
+    dim_questions = {
+        "business_impact": (
+            "What is the measurable cost of NOT solving this? "
+            "Can you put a number on it — dollars saved, hours recovered, error rate reduced?"
+        ),
+        "problem_clarity": (
+            "Who specifically is experiencing this problem today, and what is their current workaround? "
+            "Have you spoken with at least 3 people who live this pain?"
+        ),
+        "market_gap": (
+            "What existing tools or processes already address this? "
+            "What would make your solution 10× better — not just incrementally better?"
+        ),
+        "stakeholder_reach": (
+            "Who are the 3 decision-makers who must approve or adopt this? "
+            "What do they currently believe about this problem?"
+        ),
+        "domain_fit": (
+            "How closely does this align to your organisation's current SC capability and roadmap? "
+            "What adoption risk exists if you move forward without a domain champion?"
+        ),
+    }
+
+    title  = st.session_state.get("idea_title", "this idea")
+    domain = engine.answers.get("q1", "") if engine else "supply chain"
+    score  = verdict.percent
+    band   = verdict.band
+    scor   = verdict.scor_category
+    idea_ref = f'"{title}"' if title else "this idea"
+    demand_str = " / ".join(ORG_AUDIT_CONFIG["demand_patterns_display"])
+
+    # Pull audit signals
+    top_challenge = ""
+    if audit and getattr(audit, "challenges", None):
+        top_challenge = audit.challenges[0].name
+
+    dim_prompts = {
+        "business_impact": (
+            f"I'm evaluating {idea_ref} in the {domain} domain (score: {score}/100, SCOR: {scor}). "
+            f"The business impact dimension scored low. "
+            f"Help me build a one-page cost-of-delay model: "
+            f"(1) quantify the annual cost if this is NOT solved, "
+            f"(2) estimate the value captured in Year 1 if it IS solved, "
+            f"(3) identify the top 2 assumptions that would invalidate the business case. "
+            f"Use {demand_str} demand patterns as the operating context."
+        ),
+        "problem_clarity": (
+            f"I'm trying to validate the problem statement for {idea_ref} (score: {score}/100). "
+            f"Problem clarity is weak. "
+            f"Write me 5 discovery interview questions that would confirm or refute whether this is a real, "
+            f"urgent problem worth solving — not leading questions, genuine probes. "
+            f"Then suggest 3 observable signals (data or behaviours) that would constitute strong evidence."
+        ),
+        "market_gap": (
+            f"For {idea_ref} in the {domain or 'supply chain'} domain (SCOR: {scor}), "
+            f"the market gap dimension is weak. "
+            f"Identify the top 3 existing solutions (vendors, internal tools, manual processes) that already "
+            f"address this space. For each, describe what they do well and where they fall short. "
+            f"Then define what a 10× improvement would look like and whether {idea_ref} could deliver it."
+        ),
+        "stakeholder_reach": (
+            f"For {idea_ref} (score: {score}/100), stakeholder reach scored low. "
+            f"Map a power/interest grid for this initiative: "
+            f"name the roles most affected, their likely stance (champion / neutral / resistant), "
+            f"and the single most important thing each group needs to believe before they'll support it. "
+            f"Suggest one concrete action to build buy-in with the most influential sceptic."
+        ),
+        "domain_fit": (
+            f"{idea_ref} scored low on domain fit in a {domain or 'supply chain'} context. "
+            + (f"The domain audit flagged '{top_challenge}' as a concern. " if top_challenge else "")
+            + f"Identify the 3 most important supply chain capabilities an organisation needs to successfully "
+            f"adopt this idea. For each capability, suggest a diagnostic question to test whether the "
+            f"organisation already has it — and what the gap-closure plan would be if they don't."
+        ),
+    }
+
+    # Score each dimension
+    scored = []
+    for dim, score_val in verdict.dimension_scores.items():
+        max_pts = verdict.dimension_max.get(dim, 30)
+        pct = int((score_val / max_pts) * 100) if max_pts else 0
+        scored.append((pct, dim))
+    scored.sort()  # weakest first
+
+    items = []
+    for pct, dim in scored[:4]:
+        if dim not in dim_labels:
+            continue
+        items.append({
+            "dimension": dim_labels[dim],
+            "pct":       pct,
+            "question":  dim_questions.get(dim, "What assumption is most at risk here?"),
+            "ai_prompt": dim_prompts.get(dim, ""),
+        })
+        if len(items) >= 4:
+            break
+
+    # Ensure at least 2 items
+    if len(items) < 2:
+        for pct, dim in scored:
+            if dim in dim_labels and not any(i["dimension"] == dim_labels[dim] for i in items):
+                items.append({
+                    "dimension": dim_labels[dim],
+                    "pct":       pct,
+                    "question":  dim_questions.get(dim, "What assumption is most at risk here?"),
+                    "ai_prompt": dim_prompts.get(dim, ""),
+                })
+            if len(items) >= 2:
+                break
+
+    return items
+
+
+def _build_action_plan(verdict, engine, audit=None) -> list:
+    """
+    Return a list of action step dicts: {step, owner, why, tag}.
+    Steps are prioritised by band and weak dimensions.
+    """
+    band   = verdict.band
+    domain = engine.answers.get("q1", "") if engine else ""
+    q2     = engine.answers.get("q2", "") if engine else ""
+
+    dim_labels = {
+        "business_impact":   "business impact",
+        "problem_clarity":   "problem clarity",
+        "market_gap":        "market gap",
+        "stakeholder_reach": "stakeholder reach",
+        "domain_fit":        "domain fit",
+    }
+    scored = sorted(
+        [(int((s / verdict.dimension_max.get(d, 30)) * 100) if verdict.dimension_max.get(d, 30) else 0, d)
+         for d, s in verdict.dimension_scores.items()]
+    )
+    weakest_dim   = dim_labels.get(scored[0][1], "the weakest area") if scored else "problem definition"
+    second_weak   = dim_labels.get(scored[1][1], "stakeholder alignment") if len(scored) > 1 else "stakeholder alignment"
+    top_challenge = ""
+    if audit and getattr(audit, "challenges", None):
+        top_challenge = audit.challenges[0].name
+
+    domain_str = domain.replace("_", " ").title() if domain else "supply chain"
+    q2_str     = q2.replace("__", " — ").replace("_", " ").title() if q2 else "the identified problem"
+
+    if band == "high_priority":
+        steps = [
+            {"step": f"Define scope and success metrics for '{q2_str}'",
+             "owner": "PM",
+             "why":   "Lock in the north-star KPI before scoping begins so progress can be measured objectively.",
+             "tag":   "NOW"},
+            {"step": f"Schedule discovery sessions with 3 frontline {domain_str} stakeholders",
+             "owner": "PM + Ops Lead",
+             "why":   "Validate the problem is felt at the operational level before design starts.",
+             "tag":   "NOW"},
+            {"step": f"Strengthen {weakest_dim} — build a cost-of-delay estimate",
+             "owner": "Finance + PM",
+             "why":   "This is the weakest scoring dimension; a quantified business case will ease approval.",
+             "tag":   "NEXT"},
+            {"step": "Identify the data sources and system integrations required",
+             "owner": "Data Lead",
+             "why":   "Data readiness is a common blocker; surface gaps now before build commitment.",
+             "tag":   "NEXT"},
+            {"step": "Present scoping brief to leadership for Gate 1 approval",
+             "owner": "PM + Stakeholder",
+             "why":   "Gate 1 approval converts the idea into a funded initiative.",
+             "tag":   "LATER"},
+        ]
+    elif band in ("promising", "needs_clarity"):
+        steps = [
+            {"step": f"Run 3–5 structured discovery interviews focused on {weakest_dim}",
+             "owner": "PM",
+             "why":   f"This dimension scored lowest — field evidence will either confirm or kill the hypothesis quickly.",
+             "tag":   "NOW"},
+            {"step": f"Clarify {second_weak} — map who is affected and quantify the pain",
+             "owner": "PM + Ops Lead",
+             "why":   "Two weak dimensions means the case isn't compelling yet; address both before re-scoring.",
+             "tag":   "NOW"},
+            {"step": f"Audit existing solutions: what already addresses '{q2_str}'?",
+             "owner": "PM",
+             "why":   "Market gap needs evidence of differentiation, not just assumption.",
+             "tag":   "NEXT"},
+            ({"step": f"Address domain audit risk: '{top_challenge}'",
+              "owner": "Ops Lead",
+              "why":   "The audit flagged this as a material risk — it must be mitigated or accepted explicitly.",
+              "tag":   "NEXT"} if top_challenge else
+             {"step": "Document assumptions and design a 2-week spike to test the riskiest one",
+              "owner": "PM",
+              "why":   "Assumption-driven spikes are the fastest way to build or kill confidence.",
+              "tag":   "NEXT"}),
+            {"step": "Re-score after incorporating discovery findings",
+             "owner": "PM",
+             "why":   "A re-score after validation avoids anchoring on the original assessment.",
+             "tag":   "LATER"},
+        ]
+    else:  # not_ready
+        steps = [
+            {"step": "Write a crisp one-paragraph problem statement and test it with 2 colleagues",
+             "owner": "PM",
+             "why":   "Low scores across dimensions suggest the problem framing itself needs sharpening.",
+             "tag":   "NOW"},
+            {"step": f"Validate whether '{q2_str}' is the right problem to solve in {domain_str}",
+             "owner": "PM + Ops Lead",
+             "why":   "Before investing further, confirm the problem is real and worth solving.",
+             "tag":   "NOW"},
+            {"step": "Shelve this idea and set a 4-week review date",
+             "owner": "PM",
+             "why":   "A time-boxed pause prevents effort waste while keeping the option open.",
+             "tag":   "NOW"},
+            {"step": "Identify one adjacent problem in the same domain that scores higher",
+             "owner": "PM",
+             "why":   "Pivoting to a stronger variant is often faster than fixing a weak hypothesis.",
+             "tag":   "NEXT"},
+        ]
+
+    return steps
+
 
 # ------------------------------------------------------------------ #
 # SCREEN: Onboarding Wizard
@@ -524,6 +999,32 @@ def screen_onboarding():
                 help="Ideas scoring above this unlock Deep Research automatically.",
             )
 
+        st.markdown("### 👥 Team Setup")
+        st.caption(
+            "Skout surfaces ideas from teammates who are working on adjacent problems. "
+            "Set your role and a shared Team ID so your pool is correctly scoped."
+        )
+        col7, col8 = st.columns(2)
+        with col7:
+            role_type = st.selectbox(
+                "Your role in Skout",
+                options=["pm", "team_lead", "director"],
+                format_func=lambda x: {
+                    "pm":        "📋 Product Manager — evaluate ideas & see adjacencies",
+                    "team_lead": "🔗 Team Lead — flag ideas for collaboration",
+                    "director":  "📊 Director — portfolio read-only view",
+                }[x],
+                help="Controls what you see in the sidebar.",
+            )
+        with col8:
+            team_id = st.text_input(
+                "Team ID",
+                value="default",
+                placeholder="e.g. sc-emea or procurement-na",
+                help="Ideas shared within the same Team ID appear in your team pool. "
+                     "Use a short identifier agreed with your team.",
+            ).strip() or "default"
+
         st.divider()
         submitted = st.form_submit_button(
             "Save Profile & Start Evaluating →", type="primary", use_container_width=True
@@ -537,6 +1038,7 @@ def screen_onboarding():
             if ucm:
                 ucm.apply_onboarding({
                     "name": name.strip(), "role": role.strip(),
+                    "role_type": role_type, "team_id": team_id,
                     "org_name": org_name.strip(), "org_type": org_type,
                     "org_size": org_size, "regions": regions,
                     "primary_domains": primary_domains,
@@ -544,6 +1046,8 @@ def screen_onboarding():
                     "interview_count": interview_count,
                     "deep_think_threshold": deep_think_threshold,
                 })
+                # Sync team_id into session state for immediate use
+                st.session_state["team_id"] = team_id
             st.success(f"Profile saved! Welcome, {name}.")
             go("idea_input")
 
@@ -551,7 +1055,8 @@ def screen_onboarding():
     if st.button("Skip for now →"):
         ucm = st.session_state.get("ucm")
         if ucm:
-            ucm.apply_onboarding({"name": "User", "role": "PM"})
+            ucm.apply_onboarding({"name": "User", "role": "PM",
+                                   "role_type": "pm", "team_id": "default"})
         go("idea_input")
 
 # ------------------------------------------------------------------ #
@@ -652,7 +1157,7 @@ def screen_idea_input():
                     f"{m['name']}: {m['value']} {m['unit']}" for m in sig.metrics[:4]
                 ))
 
-    col1, col2 = st.columns([3, 1])
+    col1, col2, col3 = st.columns([3, 1, 1])
     with col2:
         if st.button("Start Evaluation →", type="primary", use_container_width=True):
             if not st.session_state.idea_title.strip():
@@ -661,6 +1166,72 @@ def screen_idea_input():
                 st.session_state.engine.reset()
                 st.session_state.idea_recorded = False
                 go("origin")
+    with col3:
+        _ucm_btn = st.session_state.get("ucm")
+        _has_hist = bool(_ucm_btn and _ucm_btn.get_ideas_history())
+        if st.button("📂 All Ideas", use_container_width=True, disabled=not _has_hist):
+            go("history")
+
+    # ── Previous Ideas ────────────────────────────────────────────────
+    _ucm_hi = st.session_state.get("ucm")
+    if _ucm_hi:
+        _all_ideas = _ucm_hi.get_ideas_history()
+        if _all_ideas:
+            st.divider()
+            st.markdown("### 📂 Previous Ideas")
+            st.caption(f"{len(_all_ideas)} idea(s) evaluated · click **Load** to restore any verdict")
+
+            _band_meta = {
+                "high_priority": ("🟢", "#f0fdf4", "#15803d", "#86efac", "GO"),
+                "promising":     ("🟡", "#fefce8", "#b45309", "#fbbf24", "REFINE"),
+                "needs_clarity": ("🟠", "#fff7ed", "#c2410c", "#fb923c", "REFINE"),
+                "not_ready":     ("🔴", "#fef2f2", "#b91c1c", "#fca5a5", "STOP"),
+            }
+
+            for _idx, _idea in enumerate(_all_ideas):
+                _band   = _idea.get("verdict", {}).get("band", "")
+                _emoji, _bg, _fg, _border, _dec = _band_meta.get(
+                    _band, ("⚪", "#f8fafc", "#374151", "#e2e8f0", "—")
+                )
+                _score  = int(_idea.get("score", 0))
+                _title  = _idea.get("title", "Untitled")
+                _domain = _idea.get("domain", "").replace("_", " ").title()
+                _date   = _idea.get("date", "")
+                _outcome = _idea.get("outcome", "")
+
+                _ca, _cb = st.columns([5, 1])
+                with _ca:
+                    st.markdown(
+                        f'<div style="background:{_bg};border:1px solid {_border};border-radius:8px;'
+                        f'padding:10px 14px;margin-bottom:4px">'
+                        f'<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">'
+                        f'<span style="font-size:16px">{_emoji}</span>'
+                        f'<span style="font-size:14px;font-weight:600;color:#0f172a">{_title}</span>'
+                        f'<span style="font-size:12px;font-weight:700;color:{_fg}">{_score}/100</span>'
+                        f'<span style="font-size:11px;color:#64748b">{_domain}</span>'
+                        f'<span style="font-size:11px;color:#94a3b8">{_date}</span>'
+                        + (f'<span style="font-size:11px;background:#e0f2fe;color:#0369a1;'
+                           f'padding:1px 6px;border-radius:3px">{_outcome}</span>' if _outcome else "")
+                        + f'</div></div>',
+                        unsafe_allow_html=True,
+                    )
+                with _cb:
+                    if _idea.get("verdict"):
+                        if st.button("Load ↗", key=f"hi_load_{_idx}", use_container_width=True):
+                            from core.scoring_engine import VerdictResult as _VR2
+                            st.session_state.idea_title       = _idea.get("title", "")
+                            st.session_state.idea_description = ""
+                            st.session_state.verdict          = _VR2.from_dict(_idea["verdict"])
+                            st.session_state.idea_recorded    = True
+                            st.session_state.domain_audit     = None
+                            st.session_state.research_plan    = None
+                            st.session_state.dmaic_canvas     = None
+                            st.session_state.idea_findings    = {}
+                            if _idea.get("answers"):
+                                st.session_state.engine.answers = dict(_idea["answers"])
+                            go("verdict")
+                    else:
+                        st.caption("—")
 
 # ------------------------------------------------------------------ #
 # SCREEN: Origin Pre-Question
@@ -986,12 +1557,11 @@ def screen_q5():
 
 def screen_verdict():
     """
-    SCREEN: Verdict
-    Displays the score circle, band card, Stage-Gate recommendation, score breakdown
-    (expandable), confidence flags, JTBD problem statement, McKinsey 3 Horizons
-    classification, benchmark percentile, cost estimate, framework metrics
-    (SCOR/WSJF/ODI), and the Domain Knowledge Audit section (7 patterns).
-    Records the idea to ucm on first arrival. Unlocks Research Plan when score ≥ threshold.
+    SCREEN: Verdict — tabbed layout.
+    Tabs: Overview · Deep Dive Prompts · Score Breakdown (with Framework Metrics expander) · Domain Audit.
+    Domain Knowledge Audit uses org-level predefined config (Electronics, Optimised SC,
+    Stable environment, Lumpy/Seasonal/Trigger demand) — config section hidden from team.
+    Auto-runs the domain audit on first arrival.
     """
     verdict = st.session_state.verdict
     if not verdict:
@@ -1007,13 +1577,52 @@ def screen_verdict():
             idea_title=st.session_state.idea_title,
             score=verdict.final_score,
             deep_dive=verdict.deep_dive_unlocked,
+            answers=dict(st.session_state.engine.answers),
+            verdict_dict=verdict.to_dict() if hasattr(verdict, "to_dict") else {},
         )
         st.session_state.idea_recorded = True
         for notif in ucm.get_unlock_notifications():
             st.toast(notif, icon="🔓")
 
+    engine = st.session_state.engine
+
+    # ── Build audit context from org-level config (no user-editable selectors) ──
+    audit_ctx = {
+        "industry":               ORG_AUDIT_CONFIG["industry"],
+        "demand_pattern":         ORG_AUDIT_CONFIG["demand_pattern_primary"],
+        "supply_chain_maturity":  ORG_AUDIT_CONFIG["supply_chain_maturity"],
+        "disruption_environment": ORG_AUDIT_CONFIG["disruption_environment"],
+        "scor_domain":            engine.answers.get("q1", "") if engine else "",
+    }
+
+    # ── Auto-run Domain Audit on first visit (if not already cached) ──
+    if not st.session_state.get("domain_audit") and not st.session_state.get("_audit_auto_running"):
+        st.session_state["_audit_auto_running"] = True
+        with st.spinner("🔍 Running Domain Knowledge Audit…"):
+            try:
+                factory  = st.session_state.get("factory")
+                provider = factory.get_provider() if factory else None
+                dk_engine = DomainKnowledgeEngine(
+                    llm_provider=provider,
+                    use_llm=True,
+                    industry=audit_ctx["industry"],
+                )
+                rec_text = (
+                    st.session_state.get("idea_description", "")
+                    or st.session_state.get("idea_title", "")
+                )
+                audit_result = dk_engine.evaluate(rec_text, audit_ctx)
+                st.session_state.domain_audit     = audit_result
+                st.session_state.domain_audit_ctx = audit_ctx
+            except Exception as exc:
+                st.toast(f"Auto-audit skipped: {exc}", icon="⚠️")
+        st.session_state["_audit_auto_running"] = False
+
     color = verdict.band_color
 
+    demand_display = " · ".join(ORG_AUDIT_CONFIG["demand_patterns_display"])
+
+    # ── Score circle + band card (always visible) ──
     st.markdown(
         f"""<div class="score-circle" style="background:{color}18;border:3px solid {color}">
             <span class="score-number" style="color:{color}">{verdict.percent}</span>
@@ -1021,7 +1630,6 @@ def screen_verdict():
         </div>""",
         unsafe_allow_html=True,
     )
-
     band_class = {"high_priority": "green", "promising": "highlight",
                   "needs_clarity": "yellow", "not_ready": "red"}.get(verdict.band, "")
     st.markdown(
@@ -1033,24 +1641,193 @@ def screen_verdict():
         unsafe_allow_html=True,
     )
 
-    # ── Stage-Gate Card (Phase 1) ──
-    gate_text, gate_bg, gate_text_color, gate_border = _GATE_RECOMMENDATIONS.get(
-        verdict.band,
-        ("⚪ Gate 1: Evaluate Further", "#f8fafc", "#374151", "#cbd5e1"),
-    )
-    st.markdown(
-        f"""<div class="gate-card" style="background:{gate_bg};border:1.5px solid {gate_border}">
-            <div class="gate-dot" style="background:{gate_text_color}"></div>
-            <div>
-              <div class="gate-label" style="color:{gate_text_color}">{gate_text}</div>
-              <div class="gate-sub" style="color:{gate_text_color}">Stage-Gate Model · Gate 1: Idea Screen</div>
-            </div>
-        </div>""",
-        unsafe_allow_html=True,
-    )
+    # ── Build decision + stress-test + action plan data ───────────────
+    _decision    = _build_decision(verdict)
+    _stress_test = _build_stress_test(verdict, engine, st.session_state.get("domain_audit"))
+    _action_plan = _build_action_plan(verdict, engine, st.session_state.get("domain_audit"))
 
-    # Score breakdown — expanded by default
-    with st.expander("📊 Score breakdown", expanded=True):
+    # ── Main tabs ──────────────────────────────────────────────────────
+    audit = st.session_state.get("domain_audit")
+    audit_tab_label = (
+        f"🧠 Domain Audit · {audit.overall_verdict}" if audit else "🧠 Domain Audit"
+    )
+    tab_overview, tab_prompts, tab_score_bd, tab_dmaic, tab_audit = st.tabs([
+        "🎯 Decision & Plan",
+        "🔬 Stress-Test Hypothesis",
+        "📊 Score Breakdown",
+        "📐 DMAIC Canvas",
+        audit_tab_label,
+    ])
+
+    # ══════════════════════════════════════════════════════════════════
+    # TAB 1 — DECISION & ACTION PLAN
+    # ══════════════════════════════════════════════════════════════════
+    with tab_overview:
+
+        # ── 1. Decision banner ────────────────────────────────────────
+        d = _decision
+
+        # ── Horizon pill + Benchmark row — right below the GO/REFINE/STOP banner ──
+        q2_val     = engine.answers.get("q2", "") if engine else ""
+        q4_val     = engine.answers.get("q4", "") if engine else ""
+        domain_ctx = engine.answers.get("q1", "") if engine else ""
+        if q2_val or q4_val:
+            h_code, h_label, h_bg, h_text_color, h_desc = get_horizon(verdict.band, q4_val, q2_val)
+            bm = get_benchmark(ucm, domain_ctx, verdict.final_score)
+            _hcol, _bcol = st.columns([3, 2])
+            with _hcol:
+                st.markdown(
+                    f'<span class="horizon-pill" style="background:{h_bg};color:{h_text_color}">'
+                    f'{h_code} · {h_label}</span>'
+                    f'<div class="horizon-desc" style="margin-top:4px">{h_desc}</div>',
+                    unsafe_allow_html=True,
+                )
+            with _bcol:
+                if bm:
+                    st.markdown(
+                        f'<div class="benchmark-row">'
+                        f'<div style="font-size:11px;font-weight:700;color:#64748b;'
+                        f'text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">'
+                        f'Your Benchmark</div>'
+                        f'<span class="benchmark-pct">{bm["percentile"]}th</span>'
+                        f'<span style="font-size:12px;color:#6b7280"> percentile</span>'
+                        f'<div style="font-size:11px;color:#94a3b8;margin-top:2px">'
+                        f'vs {bm["count"]} ideas · {bm["scope"]}</div>'
+                        f'</div>',
+                        unsafe_allow_html=True,
+                    )
+
+        # ── Decision banner ───────────────────────────────────────────
+        st.markdown(
+            f'<div style="background:{d["bg"]};border:2px solid {d["border"]};border-radius:12px;'
+            f'padding:20px 24px;margin-bottom:16px;margin-top:12px">'
+            f'<div style="display:flex;align-items:center;gap:12px;margin-bottom:10px">'
+            f'<span style="font-size:36px">{d["emoji"]}</span>'
+            f'<span style="font-size:28px;font-weight:800;color:{d["color"]};letter-spacing:-0.5px">'
+            f'{d["label"]}</span>'
+            f'</div>'
+            f'<div style="font-size:14px;color:#374151;line-height:1.6">{d["rationale"]}</div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+        # JTBD Problem Statement (compact, always show)
+        if engine and engine.answers.get("q2"):
+            jtbd = get_jtbd_statement(engine)
+            st.markdown(
+                f'<div class="jtbd-box" style="margin-bottom:14px">'
+                f'<div class="jtbd-label">📌 JTBD Problem Statement</div>'
+                f'{jtbd}'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+
+        # Confidence flags (compact strip)
+        for flag in verdict.confidence_flags:
+            ftype = flag.get("type", "info")
+            css   = {"warning": "flag-warning", "info": "flag-info", "caution": "flag-caution"}.get(ftype, "flag-info")
+            st.markdown(f'<div class="{css}">{flag["message"]}</div>', unsafe_allow_html=True)
+
+        # Cost estimate pill
+        cost_est = st.session_state.get("cost_estimate", "").strip()
+        if cost_est:
+            st.markdown(
+                f'<div style="background:#fefce8;border:1px solid #fbbf24;border-radius:8px;'
+                f'padding:8px 14px;font-size:13px;color:#713f12;margin:8px 0">'
+                f'💰 <strong>Estimated cost impact:</strong> {cost_est}'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+
+        st.divider()
+
+        # ── 2. Action Plan ────────────────────────────────────────────
+        st.markdown(
+            '<div style="font-size:15px;font-weight:700;color:#0f172a;margin-bottom:12px">'
+            '✅ Action Plan</div>',
+            unsafe_allow_html=True,
+        )
+
+        tag_colors = {
+            "NOW":   ("#dcfce7", "#15803d"),
+            "NEXT":  ("#fefce8", "#b45309"),
+            "LATER": ("#f0f9ff", "#0369a1"),
+        }
+
+        for i, step in enumerate(_action_plan, 1):
+            tag   = step.get("tag", "NEXT")
+            tc_bg, tc_fg = tag_colors.get(tag, ("#f1f5f9", "#475569"))
+            owner = step.get("owner", "PM")
+            st.markdown(
+                f'<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;'
+                f'padding:14px 16px;margin-bottom:10px;display:flex;gap:14px;align-items:flex-start">'
+                f'<div style="min-width:28px;height:28px;background:#6366f1;border-radius:50%;'
+                f'display:flex;align-items:center;justify-content:center;'
+                f'font-size:13px;font-weight:700;color:white;flex-shrink:0">{i}</div>'
+                f'<div style="flex:1">'
+                f'<div style="font-size:14px;font-weight:600;color:#0f172a;margin-bottom:4px">'
+                f'{step["step"]}</div>'
+                f'<div style="font-size:12px;color:#64748b;line-height:1.5">{step["why"]}</div>'
+                f'<div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">'
+                f'<span style="background:{tc_bg};color:{tc_fg};font-size:11px;font-weight:700;'
+                f'padding:2px 8px;border-radius:4px">{tag}</span>'
+                f'<span style="background:#f1f5f9;color:#475569;font-size:11px;'
+                f'padding:2px 8px;border-radius:4px">👤 {owner}</span>'
+                f'</div>'
+                f'</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+
+    # ══════════════════════════════════════════════════════════════════
+    # TAB 2 — STRESS-TEST HYPOTHESIS
+    # ══════════════════════════════════════════════════════════════════
+    with tab_prompts:
+        st.markdown(
+            '<div style="font-size:13px;color:#64748b;margin-bottom:16px">'
+            'These questions target your weakest scoring dimensions. Answer each one to sharpen '
+            'your hypothesis — then use the AI prompt to go deeper.</div>',
+            unsafe_allow_html=True,
+        )
+
+        for idx, item in enumerate(_stress_test):
+            pct   = item["pct"]
+            dim   = item["dimension"]
+            bar_color = "#dc2626" if pct < 40 else ("#ca8a04" if pct < 65 else "#16a34a")
+
+            # Dimension header with mini score bar
+            st.markdown(
+                f'<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;'
+                f'padding:16px 18px;margin-bottom:14px">'
+                f'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">'
+                f'<span style="font-size:13px;font-weight:700;color:#0f172a">{dim}</span>'
+                f'<span style="font-size:12px;font-weight:700;color:{bar_color}">{pct}%</span>'
+                f'</div>'
+                f'<div style="background:#e5e7eb;border-radius:4px;height:5px;margin-bottom:14px">'
+                f'<div style="background:{bar_color};width:{pct}%;height:5px;border-radius:4px"></div>'
+                f'</div>'
+                f'<div style="font-size:13px;font-weight:600;color:#1e40af;margin-bottom:8px">'
+                f'❓ {item["question"]}</div>'
+                f'<div style="font-size:12px;color:#64748b;font-style:italic">'
+                f'Answer this before your next stakeholder conversation.</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+
+            # Expandable AI prompt
+            with st.expander(f"🤖 AI prompt to help answer this — {dim}", expanded=False):
+                st.markdown(
+                    '<div style="font-size:12px;color:#6b7280;margin-bottom:8px">'
+                    'Copy this into Claude or ChatGPT for a detailed analysis:</div>',
+                    unsafe_allow_html=True,
+                )
+                st.code(item["ai_prompt"], language=None)
+                st.caption("Tip: add your specific context (org name, data systems, team size) before sending.")
+
+    # ══════════════════════════════════════════════════════════════════
+    # TAB 3 — SCORE BREAKDOWN (includes framework metrics)
+    # ══════════════════════════════════════════════════════════════════
+    with tab_score_bd:
         dim_labels = {
             "business_impact":   "Business Impact (Q5)",
             "problem_clarity":   "Problem Clarity (Q2)",
@@ -1087,436 +1864,508 @@ def screen_verdict():
             f"**Base:** {verdict.base_score:.1f} → **Final:** {verdict.final_score:.1f}"
         )
 
-    for flag in verdict.confidence_flags:
-        ftype = flag.get("type", "info")
-        css   = {"warning": "flag-warning", "info": "flag-info", "caution": "flag-caution"}.get(ftype, "flag-info")
-        st.markdown(f'<div class="{css}">{flag["message"]}</div>', unsafe_allow_html=True)
+        st.divider()
 
-    if verdict.next_steps:
-        st.markdown("**Suggested next steps:**")
-        for ns in verdict.next_steps:
-            st.markdown(f"- {ns}")
-
-    # ── JTBD Problem Statement (Phase 1) ──
-    engine = st.session_state.engine
-    if engine and engine.answers.get("q2"):
-        jtbd = get_jtbd_statement(engine)
-        st.markdown(
-            f'<div class="jtbd-box">'
-            f'<div class="jtbd-label">📌 JTBD Problem Statement</div>'
-            f'{jtbd}'
-            f'</div>',
-            unsafe_allow_html=True,
-        )
-
-    # ── 3 Horizons Classification + Benchmark (Phase 1) ──
-    q2 = engine.answers.get("q2", "") if engine else ""
-    q4 = engine.answers.get("q4", "") if engine else ""
-    if q2 or q4:
-        h_code, h_label, h_bg, h_text_color, h_desc = get_horizon(verdict.band, q4, q2)
-
-        col_h, col_b = st.columns([3, 2])
-        with col_h:
-            st.markdown(
-                f'<div style="margin-bottom:6px">'
-                f'<span style="font-size:11px;font-weight:700;color:#64748b;'
-                f'text-transform:uppercase;letter-spacing:0.5px">McKinsey 3 Horizons</span>'
-                f'</div>'
-                f'<span class="horizon-pill" style="background:{h_bg};color:{h_text_color}">'
-                f'{h_code} · {h_label}</span>'
-                f'<div class="horizon-desc">{h_desc}</div>',
-                unsafe_allow_html=True,
+        # Ideas Like This
+        _domain  = engine.answers.get("q1", "") if engine else ""
+        _problem = engine.answers.get("q2", "") if engine else ""
+        if _domain:
+            _similar = IdeasLikeThis().find(
+                current_domain=_domain,
+                current_score=verdict.final_score,
+                current_title=st.session_state.idea_title,
+                current_description=st.session_state.idea_description,
+                current_problem=_problem,
+                top_n=3,
             )
-
-        with col_b:
-            ucm = st.session_state.get("ucm")
-            domain = engine.answers.get("q1", "") if engine else ""
-            bm = get_benchmark(ucm, domain, verdict.final_score)
-            if bm:
-                st.markdown(
-                    f'<div class="benchmark-row">'
-                    f'<div style="font-size:11px;font-weight:700;color:#64748b;'
-                    f'text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">'
-                    f'Your Benchmark</div>'
-                    f'<span class="benchmark-pct">{bm["percentile"]}th</span>'
-                    f'<span style="font-size:12px;color:#6b7280"> percentile</span>'
-                    f'<div style="font-size:11px;color:#94a3b8;margin-top:2px">'
-                    f'vs {bm["count"]} ideas · {bm["scope"]}</div>'
-                    f'</div>',
-                    unsafe_allow_html=True,
-                )
-            else:
-                st.markdown(
-                    '<div class="benchmark-row" style="color:#94a3b8">'
-                    '<div style="font-size:11px;font-weight:700;text-transform:uppercase;'
-                    'letter-spacing:0.5px;margin-bottom:4px">Benchmark</div>'
-                    'Submit 2+ ideas to see percentile ranking.'
-                    '</div>',
-                    unsafe_allow_html=True,
-                )
-
-    # ── Cost estimate summary (if provided) ──
-    cost_est = st.session_state.get("cost_estimate", "").strip()
-    if cost_est:
-        st.markdown(
-            f'<div style="background:#fefce8;border:1px solid #fbbf24;border-radius:8px;'
-            f'padding:10px 14px;font-size:13px;color:#713f12;margin-top:8px">'
-            f'<strong>💰 Estimated cost impact:</strong> {cost_est}'
-            f'</div>',
-            unsafe_allow_html=True,
-        )
-
-    # ── Phase 2 — SCOR / WSJF / Opportunity Gap metrics strip ──
-    with st.expander("📐 Framework Metrics", expanded=False):
-        _scor  = verdict.scor_category
-        _wsjf  = verdict.wsjf_score
-        _opp   = verdict.opportunity_gap
-
-        # SCOR alignment
-        st.markdown(
-            f'<div style="margin-bottom:10px">'
-            f'<div style="font-size:11px;font-weight:700;color:#64748b;'
-            f'text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px">SCOR Framework Alignment</div>'
-            f'<span class="scor-pill">{verdict.scor_icon} {_scor}</span>'
-            f'<div style="font-size:12px;color:#64748b;margin-top:5px">{verdict.scor_description}</div>'
-            f'</div>',
-            unsafe_allow_html=True,
-        )
-
-        wsjf_color  = "#16a34a" if _wsjf >= 7 else ("#ca8a04" if _wsjf >= 4 else "#64748b")
-        opp_color   = "#16a34a" if _opp  >= 14 else ("#ca8a04" if _opp  >= 8  else "#64748b")
-        wsjf_band   = "High urgency" if _wsjf >= 7 else ("Moderate" if _wsjf >= 4 else "Low urgency")
-        opp_band    = "Underserved" if _opp >= 14 else ("Moderate gap" if _opp >= 8 else "Well-served")
-
-        st.markdown(
-            f'<div class="metrics-strip">'
-            f'<div class="metric-card">'
-            f'<div class="metric-card-label">WSJF Urgency</div>'
-            f'<div class="metric-card-value" style="color:{wsjf_color}">{_wsjf:.1f}'
-            f'<span style="font-size:13px;color:#94a3b8"> /10</span></div>'
-            f'<div class="metric-card-sub">{wsjf_band}</div>'
-            f'</div>'
-            f'<div class="metric-card">'
-            f'<div class="metric-card-label">Opportunity Gap</div>'
-            f'<div class="metric-card-value" style="color:{opp_color}">{_opp:.1f}'
-            f'<span style="font-size:13px;color:#94a3b8"> /20</span></div>'
-            f'<div class="metric-card-sub">{opp_band}</div>'
-            f'</div>'
-            f'</div>',
-            unsafe_allow_html=True,
-        )
-
-        st.caption(
-            "**WSJF** (Weighted Shortest Job First) = Cost of Delay ÷ Duration proxy — "
-            "higher scores mean the delay cost outweighs the build effort. "
-            "**Opportunity Gap** (Ulwick ODI) = Importance + max(Importance − Satisfaction, 0) — "
-            "scores ≥14 indicate an underserved problem worth prioritising."
-        )
-
-    # ── Domain Knowledge Audit (7 Patterns) ──────────────────────────
-    st.divider()
-    st.markdown("### 🧠 Domain Knowledge Audit")
-    st.caption(
-        "Stress-tests your idea against 7 supply chain domain knowledge patterns: "
-        "SCOR framework, challenger agent, KPI benchmarks, domain knowledge RAG, "
-        "multi-dimensional scoring, and context sensitivity check."
-    )
-
-    # Context inputs (collapsible)
-    with st.expander("⚙️ Audit context — set for more accurate results", expanded=False):
-        col_a, col_b = st.columns(2)
-        with col_a:
-            industry = st.selectbox(
-                "Industry vertical",
-                ["default", "retail", "automotive", "pharma", "food_beverage", "electronics", "industrial"],
-                key="audit_industry",
-                help="Selects the right KPI benchmarks for your industry",
-            )
-            demand_pattern = st.selectbox(
-                "Demand pattern",
-                ["", "stable", "seasonal", "lumpy", "new_product", "event_driven"],
-                key="audit_demand_pattern",
-                help="Required for safety stock and inventory recommendations",
-            )
-        with col_b:
-            maturity = st.selectbox(
-                "Supply chain maturity",
-                ["", "reactive", "defined", "optimised", "adaptive"],
-                key="audit_maturity",
-                help="Determines whether advanced analytics recommendations are realistic",
-            )
-            disruption = st.selectbox(
-                "Disruption environment",
-                ["", "stable", "elevated", "volatile", "crisis"],
-                key="audit_disruption",
-                help="Critical for lean/JIT and safety stock recommendations",
-            )
-
-    # Build context dict from selectors + existing Skout answers
-    audit_ctx = {
-        "industry":               st.session_state.get("audit_industry", "default"),
-        "demand_pattern":         st.session_state.get("audit_demand_pattern", "") or None,
-        "supply_chain_maturity":  st.session_state.get("audit_maturity", "") or None,
-        "disruption_environment": st.session_state.get("audit_disruption", "") or None,
-        "scor_domain":            st.session_state.engine.answers.get("q1", "") if st.session_state.engine else "",
-    }
-
-    if st.button("🔍 Run Domain Knowledge Audit", type="secondary", use_container_width=True):
-        with st.spinner("Running 7 domain knowledge patterns…"):
-            try:
-                factory = st.session_state.get("factory")
-                provider = factory.get_provider() if factory else None
-                dk_engine = DomainKnowledgeEngine(
-                    llm_provider=provider,
-                    use_llm=True,
-                    industry=audit_ctx.get("industry", "default"),
-                )
-                rec_text = (
-                    st.session_state.get("idea_description", "")
-                    or st.session_state.get("idea_title", "")
-                )
-                audit_result = dk_engine.evaluate(rec_text, audit_ctx)
-                st.session_state.domain_audit = audit_result
-                st.session_state.domain_audit_ctx = audit_ctx
-            except Exception as e:
-                st.error(f"Audit error: {e}")
-
-    # Display audit results
-    audit = st.session_state.get("domain_audit")
-    if audit:
-        # ── Overall verdict banner ──
-        v_color = audit.verdict_color
-        st.markdown(
-            f'<div style="background:{v_color}18;border-left:4px solid {v_color};'
-            f'border-radius:8px;padding:14px 18px;margin:12px 0">'
-            f'<div style="font-size:22px;font-weight:800;color:{v_color}">'
-            f'{audit.verdict_emoji} {audit.overall_verdict}</div>'
-            f'<div style="font-size:13px;color:#374151;margin-top:4px">'
-            f'Risk level: <strong style="color:{audit.risk_color}">{audit.risk_level}</strong> &nbsp;|&nbsp; '
-            f'{audit.reasoning}</div>'
-            f'</div>',
-            unsafe_allow_html=True,
-        )
-
-        # ── Tabs for each pattern ──
-        tab_ch, tab_kpi, tab_score, tab_ctx, tab_rag = st.tabs([
-            f"⚔️ Challenges ({audit.challenger_summary.get('total',0)})",
-            f"📊 KPI Warnings ({len(audit.kpi_warnings)})",
-            "📐 Domain Score",
-            "🌍 Context Check",
-            "📚 Knowledge Retrieved",
-        ])
-
-        with tab_ch:
-            # Pattern #1 — SCOR + Pattern #2 — Challenger
-            if audit.scor_risks:
-                st.markdown(f"**SCOR Domain: {audit.scor_domain.title()}** — Known risks in this domain:")
-                for r in audit.scor_risks:
-                    st.markdown(f"- {r}")
-                st.divider()
-
-            if not audit.challenges:
-                st.success("No failure patterns detected in rule-based scan.")
-            else:
-                for c in audit.challenges:
-                    badge_color = {"CRITICAL": "#dc2626", "HIGH": "#ea580c", "MEDIUM": "#ca8a04", "LOW": "#16a34a"}.get(c.severity, "#6b7280")
-                    st.markdown(
-                        f'<div style="border-left:3px solid {badge_color};padding:8px 12px;margin:6px 0;background:#f9fafb;border-radius:4px">'
-                        f'<strong style="color:{badge_color}">{c.severity_emoji} {c.severity} — {c.name}</strong><br>'
-                        f'<span style="font-size:13px;color:#374151">{c.description}</span>'
-                        f'</div>',
-                        unsafe_allow_html=True,
-                    )
-                    if c.challenge_questions:
-                        with st.expander("Challenge questions to answer →"):
-                            for q in c.challenge_questions:
-                                st.markdown(f"❓ {q}")
-                    if c.example_failure:
-                        with st.expander("Real-world failure example →"):
-                            st.caption(c.example_failure)
-
-        with tab_kpi:
-            # Pattern #3 — KPI Validator
-            if not audit.kpi_warnings:
-                st.success("No KPI benchmark violations detected.")
-            else:
-                for w in audit.kpi_warnings:
-                    sev_color = {"RED": "#dc2626", "AMBER": "#ca8a04", "INFO": "#2563eb"}.get(w.severity, "#6b7280")
-                    st.markdown(
-                        f'<div style="border-left:3px solid {sev_color};padding:8px 12px;margin:6px 0;background:#f9fafb;border-radius:4px">'
-                        f'<strong style="color:{sev_color}">{w.severity_emoji} {w.kpi_name}</strong><br>'
-                        f'<span style="font-size:13px">{w.message}</span><br>'
-                        f'<span style="font-size:12px;color:#6b7280;margin-top:4px;display:block">💡 {w.recommendation}</span>'
-                        f'</div>',
-                        unsafe_allow_html=True,
-                    )
-
-        with tab_score:
-            # Pattern #6 — Domain Scorer
-            ds = audit.domain_score
-            score_col1, score_col2 = st.columns([1, 2])
-            with score_col1:
-                sc_color = ds.verdict_color
-                st.markdown(
-                    f'<div style="background:{sc_color}18;border:2px solid {sc_color};border-radius:50%;'
-                    f'width:110px;height:110px;display:flex;flex-direction:column;align-items:center;justify-content:center;margin:0 auto">'
-                    f'<div style="font-size:28px;font-weight:800;color:{sc_color}">{ds.score_pct}%</div>'
-                    f'<div style="font-size:11px;color:#6b7280">{ds.verdict}</div>'
-                    f'</div>',
-                    unsafe_allow_html=True,
-                )
-            with score_col2:
-                from core.domain_scorer import DIMENSION_LABELS
-                for dim, label in DIMENSION_LABELS.items():
-                    score_val = ds.dimension_scores.get(dim, 0.0)
-                    # Normalise for display
-                    if dim in ("cost_impact", "resilience_impact", "service_level_impact"):
-                        bar_val = (score_val + 1.0) / 2.0
-                        display = f"{score_val:+.2f}"
-                        bar_color = "#16a34a" if score_val > 0.2 else ("#dc2626" if score_val < -0.2 else "#ca8a04")
-                    else:
-                        bar_val = score_val
-                        display = f"{score_val:.2f}"
-                        bar_color = "#2563eb"
-                    bar_pct = int(bar_val * 100)
-                    st.markdown(
-                        f'<div style="margin-bottom:8px">'
-                        f'<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:2px">'
-                        f'<span>{label}</span><span style="color:{bar_color};font-weight:700">{display}</span></div>'
-                        f'<div style="background:#e5e7eb;border-radius:4px;height:6px">'
-                        f'<div style="background:{bar_color};width:{bar_pct}%;height:6px;border-radius:4px"></div>'
-                        f'</div></div>',
-                        unsafe_allow_html=True,
-                    )
-
-            if ds.tradeoffs:
-                st.markdown("**Key tradeoffs identified:**")
-                for t in ds.tradeoffs:
-                    st.markdown(f"↔️ {t}")
-
-            if ds.blocking_reason:
-                st.error(f"🚫 Blocking reason: {ds.blocking_reason}")
-
-        with tab_ctx:
-            # Pattern #7 — Context Checker
-            cc = audit.context_check
-            completeness_color = "#16a34a" if cc.completeness_pct >= 80 else ("#ca8a04" if cc.completeness_pct >= 50 else "#dc2626")
-            st.markdown(
-                f'<div style="font-size:13px;margin-bottom:10px">'
-                f'Context completeness: <strong style="color:{completeness_color}">{cc.completeness_pct}%</strong> '
-                f'— {cc.verdict_emoji} {cc.verdict}</div>',
-                unsafe_allow_html=True,
-            )
-
-            if cc.risk_combo_warnings:
-                for warning in cc.risk_combo_warnings:
-                    st.warning(f"⚠️ High-risk combination: {warning}")
-
-            if cc.missing_critical:
-                st.error(f"🔴 Missing critical context: {', '.join(cc.missing_critical)}")
-            if cc.missing_important:
-                st.warning(f"🟡 Missing important context: {', '.join(cc.missing_important)}")
-            if cc.missing_helpful:
-                st.info(f"🔵 Optional context not provided: {', '.join(cc.missing_helpful)}")
-
-            if cc.questions_to_ask:
-                with st.expander(f"📋 {len(cc.questions_to_ask)} context gap(s) to fill →"):
-                    for q in cc.questions_to_ask[:5]:
+            _pattern_msg = IdeasLikeThis().get_pattern_summary(_domain, verdict.final_score)
+            if _similar or _pattern_msg:
+                with st.expander(
+                    "🔎 Ideas Like This (" + str(len(_similar)) + " similar in your history)",
+                    expanded=False,
+                ):
+                    if _pattern_msg:
+                        st.info(_pattern_msg)
+                    for _s in _similar:
+                        _outcome_tag = f" · _{_s.outcome}_" if _s.outcome else ""
+                        _deep_tag    = " · 🔬 deep-dived" if _s.deep_dive else ""
                         st.markdown(
-                            f"{'🔴' if q['tier']=='CRITICAL' else '🟡'} **{q['question']}**  \n"
-                            f"<span style='font-size:12px;color:#6b7280'>{q['hint']}</span>  \n"
-                            f"<span style='font-size:11px;color:#9ca3af'>Why: {q['why']}</span>",
+                            '<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;'
+                            'padding:10px 14px;margin-bottom:8px;font-size:13px">'
+                            + f"<strong>{_s.title}</strong> &nbsp; "
+                            + f'<span style="color:#6366f1;font-weight:700">{int(_s.score)}/100</span> · '
+                            + f'<span style="color:#64748b">{_s.band_label}</span> · '
+                            + f'<span style="color:#94a3b8">{_s.date}</span>{_outcome_tag}{_deep_tag}<br/>'
+                            + f'<span style="font-size:11px;color:#9ca3af">'
+                            + f'Similarity: {_s.similarity_score:.0%} — {_s.similarity_reason}</span>'
+                            + '</div>',
                             unsafe_allow_html=True,
                         )
 
-        with tab_rag:
-            # Pattern #4 — RAG Store
-            if not audit.rag_chunks:
-                st.info("No domain knowledge chunks retrieved.")
-            else:
-                st.caption(f"Retrieved {len(audit.rag_chunks)} relevant knowledge chunks from the domain knowledge base:")
-                for chunk in audit.rag_chunks:
-                    cat_emoji = {"scor": "🏗️", "kpi": "📊", "failure_pattern": "⚠️"}.get(chunk.category, "📄")
-                    relevance_pct = int(chunk.relevance * 100)
-                    with st.expander(f"{cat_emoji} {chunk.source} — relevance {relevance_pct}%"):
-                        st.markdown(f"```\n{chunk.content[:500]}\n```")
+        # Framework metrics — folded into Score Breakdown as an expander
+        with st.expander("📐 Framework Metrics (SCOR · WSJF · ODI)", expanded=False):
+            _scor = verdict.scor_category
+            _wsjf = verdict.wsjf_score
+            _opp  = verdict.opportunity_gap
 
-        # ── Action items ──
-        if audit.action_items:
-            st.markdown("**📋 Action items to address before proceeding:**")
-            for i, item in enumerate(audit.action_items[:6], 1):
-                st.markdown(f"{i}. {item}")
-
-
-    # ── Phase 4: Ideas Like This ─────────────────────────────────────
-    _engine  = st.session_state.engine
-    _domain  = _engine.answers.get("q1", "")
-    _problem = _engine.answers.get("q2", "")
-    if _domain:
-        _similar = IdeasLikeThis().find(
-            current_domain=_domain,
-            current_score=verdict.final_score,
-            current_title=st.session_state.idea_title,
-            current_description=st.session_state.idea_description,
-            current_problem=_problem,
-            top_n=3,
-        )
-        _pattern_msg = IdeasLikeThis().get_pattern_summary(_domain, verdict.final_score)
-        if _similar or _pattern_msg:
-            with st.expander(
-                "🔎 Ideas Like This (" + str(len(_similar)) + " similar in your history)",
-                expanded=False,
-            ):
-                if _pattern_msg:
-                    st.info(_pattern_msg)
-                for _s in _similar:
-                    _outcome_tag = f" · _{_s.outcome}_" if _s.outcome else ""
-                    _deep_tag    = " · 🔬 deep-dived" if _s.deep_dive else ""
-                    st.markdown(
-                        '<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;'
-                        'padding:10px 14px;margin-bottom:8px;font-size:13px">'
-                        + f"<strong>{_s.title}</strong> &nbsp; "
-                        + f'<span style="color:#6366f1;font-weight:700">{int(_s.score)}/100</span> · '
-                        + f'<span style="color:#64748b">{_s.band_label}</span> · '
-                        + f'<span style="color:#94a3b8">{_s.date}</span>{_outcome_tag}{_deep_tag}<br/>'
-                        + f'<span style="font-size:11px;color:#9ca3af">'
-                        + f'Similarity: {_s.similarity_score:.0%} — {_s.similarity_reason}</span>'
-                        + '</div>',
-                        unsafe_allow_html=True,
-                    )
-
-    # ── Phase 4: DMAIC Mode ────────────────────────────────────────────
-    with st.expander("📐 Frame as DMAIC problem", expanded=False):
-        st.caption("Generate a Define / Measure / Analyze / Improve / Control canvas from your Q1–Q5 answers.")
-        if st.button("🔨 Build DMAIC Canvas", key="build_dmaic"):
-            _canvas = DMAICEngine().build(
-                answers=st.session_state.engine.answers,
-                idea_title=st.session_state.idea_title,
-                idea_description=st.session_state.idea_description,
-                research_plan=st.session_state.get("research_plan"),
-                verdict_score=verdict.final_score,
+            st.markdown(
+                f'<div style="margin-bottom:14px">'
+                f'<div style="font-size:11px;font-weight:700;color:#64748b;'
+                f'text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px">SCOR Framework Alignment</div>'
+                f'<span class="scor-pill">{verdict.scor_icon} {_scor}</span>'
+                f'<div style="font-size:12px;color:#64748b;margin-top:5px">{verdict.scor_description}</div>'
+                f'</div>',
+                unsafe_allow_html=True,
             )
-            st.session_state.dmaic_canvas = _canvas
-            st.rerun()
-        if st.session_state.get("dmaic_canvas"):
-            st.success("✅ DMAIC canvas built — view it on the Idea Card screen.")
+
+            wsjf_color = "#16a34a" if _wsjf >= 7 else ("#ca8a04" if _wsjf >= 4 else "#64748b")
+            opp_color  = "#16a34a" if _opp  >= 14 else ("#ca8a04" if _opp  >= 8  else "#64748b")
+            wsjf_band  = "High urgency" if _wsjf >= 7 else ("Moderate" if _wsjf >= 4 else "Low urgency")
+            opp_band   = "Underserved" if _opp >= 14 else ("Moderate gap" if _opp >= 8 else "Well-served")
+
+            st.markdown(
+                f'<div class="metrics-strip">'
+                f'<div class="metric-card">'
+                f'<div class="metric-card-label">WSJF Urgency</div>'
+                f'<div class="metric-card-value" style="color:{wsjf_color}">{_wsjf:.1f}'
+                f'<span style="font-size:13px;color:#94a3b8"> /10</span></div>'
+                f'<div class="metric-card-sub">{wsjf_band}</div>'
+                f'</div>'
+                f'<div class="metric-card">'
+                f'<div class="metric-card-label">Opportunity Gap</div>'
+                f'<div class="metric-card-value" style="color:{opp_color}">{_opp:.1f}'
+                f'<span style="font-size:13px;color:#94a3b8"> /20</span></div>'
+                f'<div class="metric-card-sub">{opp_band}</div>'
+                f'</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+            st.caption(
+                "**WSJF** = Cost of Delay ÷ Duration proxy — higher = delay cost outweighs build effort. "
+                "**ODI Opportunity Gap** = Importance + max(Importance − Satisfaction, 0) — "
+                "≥14 signals an underserved problem worth prioritising."
+            )
+
+    # ══════════════════════════════════════════════════════════════════
+    # TAB 4 — DMAIC CANVAS
+    # ══════════════════════════════════════════════════════════════════
+    with tab_dmaic:
+        _canvas_exists = st.session_state.get("dmaic_canvas")
+        if not _canvas_exists:
+            st.markdown(
+                '<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;'
+                'padding:20px 24px;text-align:center;margin-bottom:16px">'
+                '<div style="font-size:32px;margin-bottom:8px">📐</div>'
+                '<div style="font-size:15px;font-weight:700;color:#0f172a;margin-bottom:6px">'
+                'DMAIC Canvas</div>'
+                '<div style="font-size:13px;color:#64748b;margin-bottom:16px">'
+                'Translate your Q1–Q5 answers into a structured Define / Measure / Analyze / '
+                'Improve / Control problem-solving canvas.</div>'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+            if st.button("🔨 Generate DMAIC Canvas", type="primary", use_container_width=True, key="build_dmaic_tab"):
+                with st.spinner("Building canvas…"):
+                    _canvas = DMAICEngine().build(
+                        answers=st.session_state.engine.answers,
+                        idea_title=st.session_state.idea_title,
+                        idea_description=st.session_state.idea_description,
+                        research_plan=st.session_state.get("research_plan"),
+                        verdict_score=verdict.final_score,
+                    )
+                    st.session_state.dmaic_canvas = _canvas
+                st.rerun()
+        else:
+            _c = st.session_state.dmaic_canvas
+            st.success("✅ DMAIC Canvas generated")
             st.download_button(
-                "📄 Download DMAIC Canvas (.md)",
-                data=st.session_state.dmaic_canvas.to_markdown(),
+                "📄 Download Canvas (.md)",
+                data=_c.to_markdown(),
                 file_name="dmaic_canvas.md",
                 mime="text/markdown",
                 use_container_width=True,
                 key="dl_dmaic_verdict",
             )
+            st.divider()
+            # Render each DMAIC phase inline
+            _phase_icons = {"Define": "🎯", "Measure": "📏", "Analyze": "🔍",
+                            "Improve": "⚙️", "Control": "🛡️"}
+            for _phase in ["Define", "Measure", "Analyze", "Improve", "Control"]:
+                _content = getattr(_c, _phase.lower(), None)
+                if _content:
+                    _icon = _phase_icons.get(_phase, "")
+                    with st.expander(f"{_icon} {_phase}", expanded=(_phase == "Define")):
+                        if isinstance(_content, dict):
+                            for _k, _v in _content.items():
+                                st.markdown(f"**{_k}:** {_v}")
+                        else:
+                            st.markdown(str(_content))
+            if st.button("🔄 Regenerate Canvas", key="regen_dmaic", use_container_width=False):
+                with st.spinner("Rebuilding…"):
+                    _canvas = DMAICEngine().build(
+                        answers=st.session_state.engine.answers,
+                        idea_title=st.session_state.idea_title,
+                        idea_description=st.session_state.idea_description,
+                        research_plan=st.session_state.get("research_plan"),
+                        verdict_score=verdict.final_score,
+                    )
+                    st.session_state.dmaic_canvas = _canvas
+                st.rerun()
 
-    # ── Final navigation ──
+    # ══════════════════════════════════════════════════════════════════
+    # TAB 5 — DOMAIN AUDIT
+    # ══════════════════════════════════════════════════════════════════
+    with tab_audit:
+        # ── Audit TL;DR — surface the headline finding immediately ──
+        _audit_now = st.session_state.get("domain_audit")
+        if _audit_now:
+            _top_ch  = _audit_now.challenges[0] if getattr(_audit_now, "challenges", None) else None
+            _top_kpi = _audit_now.kpi_warnings[0] if getattr(_audit_now, "kpi_warnings", None) else None
+            _col_a, _col_b = st.columns(2)
+            with _col_a:
+                if _top_ch:
+                    _bc = {"CRITICAL": "#dc2626", "HIGH": "#ea580c",
+                           "MEDIUM": "#ca8a04", "LOW": "#16a34a"}.get(_top_ch.severity, "#6b7280")
+                    st.markdown(
+                        f'<div style="background:{_bc}0f;border-left:4px solid {_bc};'
+                        f'border-radius:6px;padding:10px 14px;font-size:12px">'
+                        f'<div style="font-weight:700;color:{_bc};margin-bottom:3px">'
+                        f'⚔️ Top challenge · {_top_ch.severity}</div>'
+                        f'<div style="color:#374151">{_top_ch.name}</div>'
+                        f'</div>',
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    st.success("⚔️ No critical challenges flagged")
+            with _col_b:
+                if _top_kpi:
+                    _kc = {"RED": "#dc2626", "AMBER": "#ca8a04",
+                           "INFO": "#2563eb"}.get(_top_kpi.severity, "#6b7280")
+                    st.markdown(
+                        f'<div style="background:{_kc}0f;border-left:4px solid {_kc};'
+                        f'border-radius:6px;padding:10px 14px;font-size:12px">'
+                        f'<div style="font-weight:700;color:{_kc};margin-bottom:3px">'
+                        f'📊 Top KPI gap · {_top_kpi.severity}</div>'
+                        f'<div style="color:#374151">{_top_kpi.kpi_name}</div>'
+                        f'</div>',
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    st.success("📊 No KPI benchmark violations")
+            st.markdown("")  # spacer
+
+        # Org config read-only badge
+        st.markdown(
+            f'<div style="background:#f0fdf4;border:1px solid #86efac;border-radius:8px;'
+            f'padding:10px 16px;margin-bottom:14px;font-size:12px;color:#15803d">'
+            f'<strong>🏢 Org-level audit config</strong> &nbsp;·&nbsp; '
+            f'SC Maturity: <strong>Optimised</strong> &nbsp;·&nbsp; '
+            f'Environment: <strong>Stable</strong> &nbsp;·&nbsp; '
+            f'Demand: <strong>{demand_display}</strong>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+        if st.button("🔄 Re-run Domain Knowledge Audit", type="secondary", use_container_width=True):
+            with st.spinner("Running 7 domain knowledge patterns…"):
+                try:
+                    factory  = st.session_state.get("factory")
+                    provider = factory.get_provider() if factory else None
+                    dk_engine = DomainKnowledgeEngine(
+                        llm_provider=provider,
+                        use_llm=True,
+                        industry=audit_ctx["industry"],
+                    )
+                    rec_text = (
+                        st.session_state.get("idea_description", "")
+                        or st.session_state.get("idea_title", "")
+                    )
+                    audit_result = dk_engine.evaluate(rec_text, audit_ctx)
+                    st.session_state.domain_audit     = audit_result
+                    st.session_state.domain_audit_ctx = audit_ctx
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Audit error: {exc}")
+
+        audit = st.session_state.get("domain_audit")
+        if audit:
+            v_color = audit.verdict_color
+            st.markdown(
+                f'<div style="background:{v_color}18;border-left:4px solid {v_color};'
+                f'border-radius:8px;padding:14px 18px;margin:12px 0">'
+                f'<div style="font-size:22px;font-weight:800;color:{v_color}">'
+                f'{audit.verdict_emoji} {audit.overall_verdict}</div>'
+                f'<div style="font-size:13px;color:#374151;margin-top:4px">'
+                f'Risk level: <strong style="color:{audit.risk_color}">{audit.risk_level}</strong> &nbsp;|&nbsp; '
+                f'{audit.reasoning}</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+
+            # Inner audit tabs
+            a_tab_ch, a_tab_kpi, a_tab_score, a_tab_ctx, a_tab_rag = st.tabs([
+                f"⚔️ Challenges ({audit.challenger_summary.get('total', 0)})",
+                f"📊 KPI Warnings ({len(audit.kpi_warnings)})",
+                "📐 Domain Score",
+                "🌍 Context Check",
+                "📚 Knowledge Retrieved",
+            ])
+
+            with a_tab_ch:
+                if audit.scor_risks:
+                    st.markdown(f"**SCOR Domain: {audit.scor_domain.title()}** — Known risks in this domain:")
+                    for r in audit.scor_risks:
+                        st.markdown(f"- {r}")
+                    st.divider()
+                if not audit.challenges:
+                    st.success("No failure patterns detected in rule-based scan.")
+                else:
+                    for c in audit.challenges:
+                        badge_color = {"CRITICAL": "#dc2626", "HIGH": "#ea580c", "MEDIUM": "#ca8a04", "LOW": "#16a34a"}.get(c.severity, "#6b7280")
+                        st.markdown(
+                            f'<div style="border-left:3px solid {badge_color};padding:8px 12px;margin:6px 0;background:#f9fafb;border-radius:4px">'
+                            f'<strong style="color:{badge_color}">{c.severity_emoji} {c.severity} — {c.name}</strong><br>'
+                            f'<span style="font-size:13px;color:#374151">{c.description}</span>'
+                            f'</div>',
+                            unsafe_allow_html=True,
+                        )
+                        if c.challenge_questions:
+                            with st.expander("Challenge questions to answer →"):
+                                for q in c.challenge_questions:
+                                    st.markdown(f"❓ {q}")
+                        if c.example_failure:
+                            with st.expander("Real-world failure example →"):
+                                st.caption(c.example_failure)
+
+            with a_tab_kpi:
+                if not audit.kpi_warnings:
+                    st.success("No KPI benchmark violations detected.")
+                else:
+                    for w in audit.kpi_warnings:
+                        sev_color = {"RED": "#dc2626", "AMBER": "#ca8a04", "INFO": "#2563eb"}.get(w.severity, "#6b7280")
+                        st.markdown(
+                            f'<div style="border-left:3px solid {sev_color};padding:8px 12px;margin:6px 0;background:#f9fafb;border-radius:4px">'
+                            f'<strong style="color:{sev_color}">{w.severity_emoji} {w.kpi_name}</strong><br>'
+                            f'<span style="font-size:13px">{w.message}</span><br>'
+                            f'<span style="font-size:12px;color:#6b7280;margin-top:4px;display:block">💡 {w.recommendation}</span>'
+                            f'</div>',
+                            unsafe_allow_html=True,
+                        )
+
+            with a_tab_score:
+                ds = audit.domain_score
+                score_col1, score_col2 = st.columns([1, 2])
+                with score_col1:
+                    sc_color = ds.verdict_color
+                    st.markdown(
+                        f'<div style="background:{sc_color}18;border:2px solid {sc_color};border-radius:50%;'
+                        f'width:110px;height:110px;display:flex;flex-direction:column;align-items:center;'
+                        f'justify-content:center;margin:0 auto">'
+                        f'<div style="font-size:28px;font-weight:800;color:{sc_color}">{ds.score_pct}%</div>'
+                        f'<div style="font-size:11px;color:#6b7280">{ds.verdict}</div>'
+                        f'</div>',
+                        unsafe_allow_html=True,
+                    )
+                with score_col2:
+                    from core.domain_scorer import DIMENSION_LABELS
+                    for dim, label in DIMENSION_LABELS.items():
+                        score_val = ds.dimension_scores.get(dim, 0.0)
+                        if dim in ("cost_impact", "resilience_impact", "service_level_impact"):
+                            bar_val   = (score_val + 1.0) / 2.0
+                            display   = f"{score_val:+.2f}"
+                            bar_color = "#16a34a" if score_val > 0.2 else ("#dc2626" if score_val < -0.2 else "#ca8a04")
+                        else:
+                            bar_val   = score_val
+                            display   = f"{score_val:.2f}"
+                            bar_color = "#2563eb"
+                        bar_pct = int(bar_val * 100)
+                        st.markdown(
+                            f'<div style="margin-bottom:8px">'
+                            f'<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:2px">'
+                            f'<span>{label}</span><span style="color:{bar_color};font-weight:700">{display}</span></div>'
+                            f'<div style="background:#e5e7eb;border-radius:4px;height:6px">'
+                            f'<div style="background:{bar_color};width:{bar_pct}%;height:6px;border-radius:4px"></div>'
+                            f'</div></div>',
+                            unsafe_allow_html=True,
+                        )
+                if ds.tradeoffs:
+                    st.markdown("**Key tradeoffs identified:**")
+                    for t in ds.tradeoffs:
+                        st.markdown(f"↔️ {t}")
+                if ds.blocking_reason:
+                    st.error(f"🚫 Blocking reason: {ds.blocking_reason}")
+
+            with a_tab_ctx:
+                cc = audit.context_check
+                completeness_color = "#16a34a" if cc.completeness_pct >= 80 else ("#ca8a04" if cc.completeness_pct >= 50 else "#dc2626")
+                st.markdown(
+                    f'<div style="font-size:13px;margin-bottom:10px">'
+                    f'Context completeness: <strong style="color:{completeness_color}">{cc.completeness_pct}%</strong> '
+                    f'— {cc.verdict_emoji} {cc.verdict}</div>',
+                    unsafe_allow_html=True,
+                )
+                if cc.risk_combo_warnings:
+                    for warning in cc.risk_combo_warnings:
+                        st.warning(f"⚠️ High-risk combination: {warning}")
+                if cc.missing_critical:
+                    st.error(f"🔴 Missing critical context: {', '.join(cc.missing_critical)}")
+                if cc.missing_important:
+                    st.warning(f"🟡 Missing important context: {', '.join(cc.missing_important)}")
+                if cc.missing_helpful:
+                    st.info(f"🔵 Optional context not provided: {', '.join(cc.missing_helpful)}")
+                if cc.questions_to_ask:
+                    with st.expander(f"📋 {len(cc.questions_to_ask)} context gap(s) to fill →"):
+                        for q in cc.questions_to_ask[:5]:
+                            st.markdown(
+                                f"{'🔴' if q['tier']=='CRITICAL' else '🟡'} **{q['question']}**  \n"
+                                f"<span style='font-size:12px;color:#6b7280'>{q['hint']}</span>  \n"
+                                f"<span style='font-size:11px;color:#9ca3af'>Why: {q['why']}</span>",
+                                unsafe_allow_html=True,
+                            )
+
+            with a_tab_rag:
+                if not audit.rag_chunks:
+                    st.info("No domain knowledge chunks retrieved.")
+                else:
+                    st.caption(f"Retrieved {len(audit.rag_chunks)} relevant knowledge chunks:")
+                    for chunk in audit.rag_chunks:
+                        cat_emoji = {"scor": "🏗️", "kpi": "📊", "failure_pattern": "⚠️"}.get(chunk.category, "📄")
+                        relevance_pct = int(chunk.relevance * 100)
+                        with st.expander(f"{cat_emoji} {chunk.source} — relevance {relevance_pct}%"):
+                            st.markdown(f"```\n{chunk.content[:500]}\n```")
+
+            if audit.action_items:
+                st.markdown("**📋 Action items to address before proceeding:**")
+                for i, item in enumerate(audit.action_items[:6], 1):
+                    st.markdown(f"{i}. {item}")
+        else:
+            st.info("Domain audit is running — please wait or click Re-run above.")
+
+    # ── Final navigation (outside tabs) ──
     st.divider()
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("← Reevaluate", use_container_width=True):
-            st.session_state.engine.reset()
-            go("idea_input")
-    with col2:
+
+    # ══════════════════════════════════════════════════════════════════
+    # LOG FINDINGS — inline form
+    # ══════════════════════════════════════════════════════════════════
+    st.markdown(
+        '<div style="font-size:15px;font-weight:700;color:#0f172a;margin-bottom:4px">'
+        '📝 Log Your Findings</div>'
+        '<div style="font-size:13px;color:#64748b;margin-bottom:14px">'
+        'Record what you learned from discovery, stakeholder conversations, or research. '
+        'Saved findings travel with this idea.</div>',
+        unsafe_allow_html=True,
+    )
+
+    _existing = st.session_state.get("idea_findings", {})
+
+    _hyp_status = st.radio(
+        "Hypothesis status",
+        ["🟢 Confirmed", "🟡 Partially confirmed", "🔴 Refuted", "⚪ Still open"],
+        index=["🟢 Confirmed", "🟡 Partially confirmed", "🔴 Refuted", "⚪ Still open"].index(
+            _existing.get("hyp_status", "⚪ Still open")
+        ),
+        horizontal=True,
+        key="findings_hyp_status",
+    )
+
+    _col_f1, _col_f2 = st.columns(2)
+    with _col_f1:
+        _key_finding = st.text_area(
+            "Key finding",
+            value=_existing.get("key_finding", ""),
+            height=100,
+            placeholder="What did you learn? What evidence supports or challenges the hypothesis?",
+            key="findings_key_finding",
+        )
+    with _col_f2:
+        _main_risk = st.text_area(
+            "Main risk identified",
+            value=_existing.get("main_risk", ""),
+            height=100,
+            placeholder="What is the single biggest risk or blocker? Who owns mitigating it?",
+            key="findings_main_risk",
+        )
+
+    _outcome_tag = st.selectbox(
+        "Outcome tag",
+        ["— select —", "✅ Validated", "⚠️ At risk", "🗄️ Parked", "🚀 Approved to scope"],
+        index=["— select —", "✅ Validated", "⚠️ At risk", "🗄️ Parked", "🚀 Approved to scope"].index(
+            _existing.get("outcome_tag", "— select —")
+        ) if _existing.get("outcome_tag", "— select —") in [
+            "— select —", "✅ Validated", "⚠️ At risk", "🗄️ Parked", "🚀 Approved to scope"
+        ] else 0,
+        key="findings_outcome_tag",
+    )
+
+    _save_col, _clear_col = st.columns([3, 1])
+    with _save_col:
+        if st.button("💾 Save findings", type="primary", use_container_width=True, key="save_findings_btn"):
+            _findings_data = {
+                "hyp_status":  _hyp_status,
+                "key_finding": _key_finding.strip(),
+                "main_risk":   _main_risk.strip(),
+                "outcome_tag": _outcome_tag if _outcome_tag != "— select —" else "",
+                "saved_at":    __import__("datetime").datetime.now().strftime("%Y-%m-%d %H:%M"),
+                "idea_title":  st.session_state.get("idea_title", ""),
+                "score":       verdict.final_score,
+            }
+            st.session_state["idea_findings"] = _findings_data
+            # Also persist into UCM if available
+            _ucm_ref = st.session_state.get("ucm")
+            if _ucm_ref and hasattr(_ucm_ref, "record_finding"):
+                try:
+                    _ucm_ref.record_finding(_findings_data)
+                except Exception:
+                    pass
+            st.toast("Findings saved ✅", icon="📝")
+            st.rerun()
+    with _clear_col:
+        if st.button("🗑️ Clear", use_container_width=True, key="clear_findings_btn"):
+            st.session_state["idea_findings"] = {}
+            st.rerun()
+
+    # Show saved badge if findings exist
+    if _existing.get("saved_at"):
+        st.markdown(
+            f'<div style="background:#f0fdf4;border:1px solid #86efac;border-radius:8px;'
+            f'padding:10px 14px;font-size:12px;color:#15803d;margin-top:6px">'
+            f'✅ Findings saved · {_existing["saved_at"]} · '
+            f'<strong>{_existing.get("outcome_tag","")}</strong></div>',
+            unsafe_allow_html=True,
+        )
+
+    st.divider()
+
+    # Refine Problem Description — inline editor, preserves all Q1/Q3/Q4/Q5 answers and score weights
+    with st.expander("✏️ Refine problem description", expanded=False):
+        st.caption(
+            "Update how you've described the problem without changing the scored answers. "
+            "This refreshes the JTBD statement and domain audit context — it does not alter your score."
+        )
+        _current_desc = st.session_state.get("idea_description", "")
+        _new_desc = st.text_area(
+            "Problem description",
+            value=_current_desc,
+            height=110,
+            key="refine_desc_input",
+            label_visibility="collapsed",
+            placeholder="Describe the problem your idea addresses…",
+        )
+        if st.button("💾 Save & refresh", key="save_refined_desc", use_container_width=True):
+            if _new_desc.strip() and _new_desc.strip() != _current_desc:
+                st.session_state.idea_description = _new_desc.strip()
+                # Clear audit so it re-runs with new description on next render
+                st.session_state.domain_audit = None
+                st.session_state["_audit_auto_running"] = False
+                st.toast("Problem description updated — re-running audit…", icon="✅")
+                st.rerun()
+            else:
+                st.info("No changes to save.")
+
+    col_nav1, col_nav2 = st.columns(2)
+    with col_nav1:
+        st.caption("")  # spacer — Reevaluate removed to prevent score manipulation via Q1–Q5
+    with col_nav2:
         if verdict.deep_dive_unlocked:
             if st.button("🔬 Open Research Plan →", type="primary", use_container_width=True):
                 go("research_plan")
@@ -2220,6 +3069,134 @@ def screen_idea_card():
                             if _ctxt.strip(): add_team_comment(_ti["title"], _author, _ctxt.strip(), _tid); st.rerun()
 
 
+
+# ------------------------------------------------------------------ #
+# SCREEN: All Ideas History
+# ------------------------------------------------------------------ #
+
+def screen_history():
+    """
+    SCREEN: All Ideas — full history list with load buttons.
+    """
+    st.markdown("## 📂 All Ideas")
+    ucm = st.session_state.get("ucm")
+    if not ucm:
+        st.info("No history yet — evaluate an idea to get started.")
+        if st.button("← Back", use_container_width=False):
+            go("idea_input")
+        return
+
+    all_ideas = ucm.get_ideas_history()
+    if not all_ideas:
+        st.info("No ideas evaluated yet.")
+        if st.button("← Evaluate your first idea", type="primary"):
+            go("idea_input")
+        return
+
+    band_meta = {
+        "high_priority": ("🟢", "#f0fdf4", "#15803d", "#86efac", "GO"),
+        "promising":     ("🟡", "#fefce8", "#b45309", "#fbbf24", "REFINE"),
+        "needs_clarity": ("🟠", "#fff7ed", "#c2410c", "#fb923c", "REFINE"),
+        "not_ready":     ("🔴", "#fef2f2", "#b91c1c", "#fca5a5", "STOP"),
+    }
+
+    # ── Summary stats row ─────────────────────────────────────────
+    total      = len(all_ideas)
+    go_count   = sum(1 for i in all_ideas if i.get("verdict", {}).get("band") == "high_priority")
+    avg_score  = int(sum(i.get("score", 0) for i in all_ideas) / total) if total else 0
+    top_domain = ""
+    from collections import Counter
+    domain_counts = Counter(i.get("domain", "") for i in all_ideas if i.get("domain"))
+    if domain_counts:
+        top_domain = domain_counts.most_common(1)[0][0].replace("_", " ").title()
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Total ideas", total)
+    c2.metric("GO decisions", go_count)
+    c3.metric("Avg score", f"{avg_score}/100")
+    c4.metric("Top domain", top_domain or "—")
+
+    st.divider()
+
+    # ── Filter row ────────────────────────────────────────────────
+    _fcol1, _fcol2 = st.columns([2, 3])
+    with _fcol1:
+        _filter_band = st.selectbox(
+            "Filter by decision",
+            ["All", "🟢 GO", "🟡 REFINE (promising)", "🟠 REFINE (needs clarity)", "🔴 STOP"],
+            key="hist_filter_band",
+        )
+    with _fcol2:
+        _search = st.text_input("Search by title", placeholder="Type to filter…", key="hist_search")
+
+    band_filter_map = {
+        "🟢 GO":                   "high_priority",
+        "🟡 REFINE (promising)":   "promising",
+        "🟠 REFINE (needs clarity)": "needs_clarity",
+        "🔴 STOP":                 "not_ready",
+    }
+    _band_key = band_filter_map.get(_filter_band, None)
+
+    filtered = [
+        (idx, idea) for idx, idea in enumerate(all_ideas)
+        if (_band_key is None or idea.get("verdict", {}).get("band") == _band_key)
+        and (_search.strip() == "" or _search.strip().lower() in (idea.get("title") or "").lower())
+    ]
+
+    if not filtered:
+        st.info("No ideas match the current filter.")
+    else:
+        st.caption(f"Showing {len(filtered)} of {total} ideas")
+        for _idx, idea in filtered:
+            _band   = idea.get("verdict", {}).get("band", "")
+            _emoji, _bg, _fg, _border, _dec = band_meta.get(
+                _band, ("⚪", "#f8fafc", "#374151", "#e2e8f0", "—")
+            )
+            _score   = int(idea.get("score", 0))
+            _title   = idea.get("title", "Untitled")
+            _domain  = idea.get("domain", "").replace("_", " ").title()
+            _date    = idea.get("date", "")
+            _outcome = idea.get("outcome", "") or ""
+
+            _ca, _cb = st.columns([5, 1])
+            with _ca:
+                st.markdown(
+                    f'<div style="background:{_bg};border:1px solid {_border};border-radius:8px;'
+                    f'padding:10px 14px;margin-bottom:4px">'
+                    f'<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">'
+                    f'<span style="font-size:16px">{_emoji}</span>'
+                    f'<span style="font-size:14px;font-weight:600;color:#0f172a">{_title}</span>'
+                    f'<span style="font-size:12px;font-weight:700;color:{_fg}">{_score}/100 · {_dec}</span>'
+                    f'<span style="font-size:11px;color:#64748b">{_domain}</span>'
+                    f'<span style="font-size:11px;color:#94a3b8">{_date}</span>'
+                    + (f'<span style="font-size:11px;background:#e0f2fe;color:#0369a1;'
+                       f'padding:1px 6px;border-radius:3px">{_outcome}</span>' if _outcome else "")
+                    + f'</div></div>',
+                    unsafe_allow_html=True,
+                )
+            with _cb:
+                if idea.get("verdict"):
+                    if st.button("Load ↗", key=f"hs_load_{_idx}", use_container_width=True):
+                        from core.scoring_engine import VerdictResult as _VR3
+                        st.session_state.idea_title       = idea.get("title", "")
+                        st.session_state.idea_description = ""
+                        st.session_state.verdict          = _VR3.from_dict(idea["verdict"])
+                        st.session_state.idea_recorded    = True
+                        st.session_state.domain_audit     = None
+                        st.session_state.research_plan    = None
+                        st.session_state.dmaic_canvas     = None
+                        st.session_state.idea_findings    = {}
+                        if idea.get("answers"):
+                            st.session_state.engine.answers = dict(idea["answers"])
+                        go("verdict")
+                else:
+                    st.caption("—")
+
+    st.divider()
+    if st.button("← Back to home", use_container_width=False):
+        go("idea_input")
+
+
 # ------------------------------------------------------------------ #
 # Sidebar
 # ------------------------------------------------------------------ #
@@ -2256,6 +3233,7 @@ def render_sidebar():
                 if stats.get("avg_score"):
                     st.caption(f"Avg: **{stats['avg_score']}** · Top: **{stats['top_domain']}**")
 
+
         if st.session_state.idea_title:
             st.markdown("---")
             st.markdown(f"**{st.session_state.idea_title}**")
@@ -2281,18 +3259,37 @@ def render_sidebar():
             if history:
                 st.markdown("---")
                 st.markdown("**Recent ideas**")
-                for idea in history[:5]:
+                for _hi, idea in enumerate(history[:5]):
                     score   = idea.get("score", 0)
                     title   = (idea.get("title") or "Untitled")
-                    short   = title[:24] + "…" if len(title) > 24 else title
-                    outcome = idea.get("outcome")
-                    tag     = f" · {outcome}" if outcome else ""
-                    st.caption(f"**{int(score)}** · {short}{tag}")
+                    short   = title[:22] + "…" if len(title) > 22 else title
+                    band    = idea.get("verdict", {}).get("band", "")
+                    emoji   = {"high_priority": "🟢", "promising": "🟡",
+                               "needs_clarity": "🟠", "not_ready": "🔴"}.get(band, "⚪")
+                    _lc, _rc = st.columns([3, 1])
+                    _lc.caption(f"{emoji} **{int(score)}** · {short}")
+                    if idea.get("verdict") and _rc.button("↗", key=f"sb_load_{_hi}", help="Load this idea"):
+                        from core.scoring_engine import VerdictResult as _VR
+                        st.session_state.idea_title       = idea.get("title", "")
+                        st.session_state.idea_description = ""
+                        st.session_state.verdict          = _VR.from_dict(idea["verdict"])
+                        st.session_state.idea_recorded    = True
+                        st.session_state.domain_audit     = None
+                        st.session_state.research_plan    = None
+                        st.session_state.dmaic_canvas     = None
+                        if idea.get("answers"):
+                            st.session_state.engine.answers = dict(idea["answers"])
+                        go("verdict")
 
         if ucm and ucm.is_onboarded():
             st.markdown("---")
-            if st.button("✏️ Edit Profile", use_container_width=True):
-                go("onboarding")
+            _sb1, _sb2 = st.columns(2)
+            with _sb1:
+                if st.button("✏️ Profile", use_container_width=True):
+                    go("onboarding")
+            with _sb2:
+                if st.button("📂 All Ideas", use_container_width=True):
+                    go("history")
 
         # ── Phase 4 & 5 indicators ──
         _sig = st.session_state.get("signal")
@@ -2344,4 +3341,5 @@ render_sidebar()
     "research_plan": screen_research_plan,
     "findings":      screen_findings,
     "idea_card":     screen_idea_card,
+    "history":       screen_history,
 }.get(st.session_state.step, screen_idea_input)()

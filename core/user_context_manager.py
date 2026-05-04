@@ -215,8 +215,19 @@ class UserContextManager:
         idea_title: str = "",
         score: float = 0.0,
         deep_dive: bool = False,
+        answers: dict = None,
+        verdict_dict: dict = None,
     ) -> None:
-        """Call this every time a verdict is reached."""
+        """Call this every time a verdict is reached.
+
+        Args:
+            domain:       Q1 domain id (e.g. 'planning').
+            idea_title:   Human-readable idea title / problem description.
+            score:        Final verdict score (0-100).
+            deep_dive:    Whether deep-dive was unlocked.
+            answers:      Full QuestionEngine answers dict for replay.
+            verdict_dict: Serialized VerdictResult (from VerdictResult.to_dict()).
+        """
         # Update domain history
         dh = self._learning_dict("domain_history")
         dh[domain] = dh.get(domain, 0) + 1
@@ -230,7 +241,7 @@ class UserContextManager:
         if top:
             self._ctx.setdefault("domain_preferences", {})["primary"] = top
 
-        # Save idea to history
+        # Save idea to history (with full replay data)
         self._ideas.append({
             "title":       idea_title,
             "domain":      domain,
@@ -238,6 +249,8 @@ class UserContextManager:
             "deep_dive":   deep_dive,
             "outcome":     None,
             "date":        str(date.today()),
+            "answers":     answers or {},
+            "verdict":     verdict_dict or {},
         })
         self._save_ideas()
         self.save()

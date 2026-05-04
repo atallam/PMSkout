@@ -1,36 +1,40 @@
 custom_extensions:
   domains: []
 domain_preferences:
-  primary: procurement
-  secondary: []
+  primary: planning
+  secondary:
+  - planning
+  - repair
   wip_interest: []
 learning_data:
   domain_history:
-    planning: 3
+    planning: 5
     procurement: 3
-  ideas_submitted: 6
+    repair: 5
+  ideas_submitted: 13
   outcomes_tracked: 0
-  research_completed: 4
+  research_completed: 6
 profile:
   id: ''
-  name: Avinash Tallam
+  name: Avinash
   organization:
-    name: Dell Technologies
+    name: Dell
     regions:
     - Global
     size: Enterprise (5k+)
     type: Other
-  role: senior PM
+  role: Senior Product Manager
+  role_type: pm
+  team_id: default
 research_preferences:
-  custom_data_sources:
-  - Other
+  custom_data_sources: []
   deep_think_threshold: 80
   default_interview_count: 5
   known_stakeholders: []
   preferred_methods:
   - User Interviews
   - Process Observation
-  - Data Pull (ERP/AP)
+  - Data Pull (ERP)
 scoring_customization:
   enabled: false
   weights:

@@ -17,7 +17,8 @@
 9. [Domain Coverage](#9-domain-coverage)
 10. [Config File Map](#10-config-file-map)
 11. [Key Architectural Decisions](#11-key-architectural-decisions)
-12. [Known Limitations & Planned Improvements](#12-known-limitations--planned-improvements)
+12. [Team Architecture & Sidebar Strategy](#12-team-architecture--sidebar-strategy)
+13. [Known Limitations & Planned Improvements](#13-known-limitations--planned-improvements)
 
 ---
 
@@ -340,28 +341,109 @@ No changes to `app.py` or `research_planner.py` are needed.
 
 ---
 
-## 12. Known Limitations & Planned Improvements
+## 12. Team Architecture & Sidebar Strategy
+
+> Decisions captured from design brainstorm session, May 2026.
+
+### Team Context
+
+Product Skout is being extended from a single-user tool to a **team ideation platform** for distributed PM teams. Key characteristics that shape every design decision:
+
+- PMs are **domain-siloed** — Planning, Procurement, and Repair PMs have minimal idea overlap day-to-day
+- Teams are **geographically distributed** across regions (APAC, EMEA, etc.)
+- Skout is a **pure ideation tool** — it does not replace Jira, Asana, or any project management system
+- Ideas need to be **visible across the team** so PMs can discover adjacencies and collaborate
+
+### Why "Perspective" Won as the Sidebar's Primary Job
+
+Three candidate jobs were considered for the sidebar: **continuity** (where am I, how do I navigate), **perspective** (how does this idea compare), and **actions** (what do I do next). Perspective won because the verdict screen already handles recommended actions. The sidebar's unique value is surfacing context the PM cannot see within a single evaluation — specifically historical patterns and cross-team signals.
+
+Outcome-correlated perspective (e.g., "ideas that scored like this — here's what happened to them") is the richest form of perspective but requires sufficient outcome data to be meaningful. Until that data exists, the sidebar focuses on **retrospective benchmarking** (your domain history, team domain coverage) and **adjacency detection** (ideas that overlap across domain boundaries).
+
+### Role Model — Three Levels
+
+| Role | Primary Job | Sidebar View |
+|------|------------|-------------|
+| **PM** | Evaluate ideas in their domain | Personal history, domain benchmarks, adjacency alerts |
+| **Team Lead / Manager** | Coordinate PMs on adjacent ideas | Team pool view, flag-for-collaboration action, cross-domain pattern cards |
+| **Director** | Portfolio visibility across all domains | Read-only: score distribution, domain coverage, high-priority ideas, cross-domain signals |
+
+**Multiple team leads are supported** — the role is not exclusive. A Director can also hold a Team Lead role.
+
+### Team Lead Capabilities — Start Small (v1)
+
+The v1 team lead feature set is deliberately narrow. Complexity is deferred until adoption is established.
+
+**In scope for v1:**
+- **Read-only director view** — aggregated portfolio lens: domain coverage heatmap, score distribution, top-5 high-priority ideas, cross-domain pattern flags. No intervention capability.
+- **Flag for collaboration** — a Team Lead can flag two adjacent ideas and send a lightweight notification to the relevant PMs ("Your idea overlaps with [PM name]'s — worth a conversation"). This is a nudge, not a task assignment.
+
+**Explicitly deferred (not v1):**
+- ~~Merge ideas~~ — unclear ownership semantics (whose research plan survives?); adds data model complexity
+- ~~Assign ideas~~ — this is PM tool territory; contradicts the "pure ideation" principle
+- ~~Outcome-correlated insights~~ — requires sufficient outcome tagging history to be meaningful
+
+### Sidebar Adjacency Detection — How It Works
+
+Adjacency is detected when two ideas from different PMs share:
+- The same `problem_id` (Q2 answer), OR
+- The same `domain` with overlapping `stakeholder` (Q3), OR
+- A high-similarity score on the idea `description` field (future: lightweight embedding comparison)
+
+When adjacency is detected, the PM sidebar shows a subtle alert card: *"[PM name] is evaluating something similar in [domain] — [score]/100."* The Team Lead sidebar shows this across all PMs simultaneously.
+
+### Visibility Model
+
+- **Default: ideas are shared within the team pool** — this is required for adjacency detection to work at scale. PMs who want private evaluation can opt out per idea.
+- The `share_to_team` function already exists in `core/integrations.py`; the default behavior needs to be inverted from opt-in to opt-out.
+- Team ID scoping is already in `st.session_state.team_id` — extend this to support multiple named pools (one per team or region).
+
+### What the Sidebar Should NOT Do
+
+- **Not a navigation hub** — the main screen handles step flow; the sidebar should not duplicate this
+- **Not a task tracker** — no assignment, due dates, or status tracking
+- **Not a chat interface** — "flag for collaboration" is a notification trigger, not a conversation thread
+- **Not always-on team feed** — a live activity stream of all team evaluations creates noise; surface signals only when actionable (adjacency found, high-priority idea submitted)
+
+---
+
+## 13. Known Limitations & Planned Improvements
 
 ### Current Limitations
 
-**Single-user only:** `user_context.yaml` and `data/ideas.json` are local files. There is no multi-user support or authentication. For team deployment, these would need to be replaced with a shared store (SQLite, Postgres, or a cloud key-value store).
+**Multi-user requires shared store:** `user_context.yaml` and `data/ideas.json` are local files. For team deployment these need to be replaced with a shared store (SQLite, Postgres, or a cloud key-value store). The `UserContextManager` interface is already abstracted — `load()`, `save()`, `get_ideas_history()` — so the backing store can be swapped without changing calling code.
 
-**No outcome tracking yet:** Phase 3 promises outcome tracking (did the idea get built? did it succeed?), but the data model and UI are not yet implemented. The `ideas.json` schema has a placeholder `outcome` field.
+**Ideas shared opt-in today, needs to be opt-out:** The current `share_to_team` function requires explicit sharing. For the adjacency detection model to work at team scale, sharing should default to on, with a per-idea private toggle.
 
-**Trade & Fraud domains incomplete:** These two domains are hidden pending fuller Q2 branching options and domain-specific research templates (Task 8).
+**No outcome tracking yet:** Phase 3 promises outcome tracking (pursued / abandoned / validated), but the data model and UI are not yet implemented. The `ideas.json` schema has a placeholder `outcome` field. Outcome-correlated insights (pattern matching against past outcomes) are deferred until there is enough tagged data to be meaningful — premature display of this feature would surface empty or misleading signals.
 
-**Research plan is one-shot:** The plan is generated once at verdict time and not regeneratable from the same idea without re-evaluating. A "Regenerate plan" button with optional additional context would improve this.
+**Trade & Fraud domains incomplete:** Hidden pending Q2 branching options and domain-specific research templates. To re-enable: set `hidden: false` and `wip: false` in `config/questions.yaml` — all scoring and research scaffolding is already in place.
 
-**No export to project management tools:** Idea cards and research plans are viewable in-app but not exportable to Jira, Linear, Notion, or Asana. This is a high-value future integration.
+**Research plan is one-shot:** Generated once at verdict time; not regeneratable without re-evaluating the idea. A "Regenerate plan" button with optional additional context field would improve iteration speed.
 
-### Planned Improvements (Task 8 and beyond)
+**Adjacency detection is keyword-based today:** Current similar-idea detection uses `domain` + `problem_id` matching only. Future: lightweight embedding comparison on idea descriptions for fuzzy adjacency across domain boundaries.
 
-- **Task 8:** Domain research for Trade & Compliance and Fraud & Risk — Q2 adaptive options, Q3 ordering, and research plan templates
-- **Outcome feedback loop:** Let users mark whether the idea was built and whether it succeeded; use this to recalibrate scores over time
-- **Team mode:** Shared idea backlog with role-based views (PM, engineering, leadership)
-- **Idea comparison:** Side-by-side scoring of two ideas to help triage competing priorities
-- **Webhook / integration layer:** Push verdict + research plan to Notion page, Jira ticket, or Slack channel on submission
-- **CSV export:** Batch export of all evaluated ideas with scores and dimensions for portfolio-level analysis
+### Planned Improvements — Prioritised
+
+**Next (Team v1):**
+- Read-only Director view in sidebar — domain coverage, score distribution, high-priority ideas surfaced
+- Flag-for-collaboration action for Team Leads — lightweight nudge to two PMs with adjacent ideas
+- Default-share ideas within team pool (opt-out per idea, not opt-in)
+- Sidebar adjacency alert for PMs — "A colleague is evaluating something similar"
+
+**Soon:**
+- Domain research for Trade & Compliance and Fraud & Risk — Q2 options, Q3 ordering, research templates
+- Outcome feedback loop — mark idea as pursued / abandoned / validated; begin building history for future insight correlation
+- Idea comparison — side-by-side scoring of two ideas for triage decisions
+
+**Later (needs outcome data first):**
+- Outcome-correlated perspective in sidebar — "Ideas that scored like this in your domain: X pursued, Y shelved"
+- Cross-domain pattern cards — "Supplier visibility flagged across Planning, Procurement, Repair this month"
+- Score recalibration from outcome history
+
+**Integrations:**
+- Webhook / push layer — verdict + research plan to Notion, Jira, Slack on submission (partial implementation exists in `core/integrations.py`)
+- CSV export — batch export of all ideas with scores and dimensions for portfolio analysis
 
 ---
 

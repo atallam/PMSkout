@@ -40,7 +40,7 @@ git status
 git commit -m "Initial commit: Skout with 7 domain knowledge patterns"
 
 # Step 6: Connect to GitHub (paste YOUR repository URL from Step 3 above)
-git remote add origin https://github.com/YOUR_USERNAME/skout.git
+git remote add origin https://github.com/atallam/PMSkout.git
 
 # Step 7: Push to GitHub
 git branch -M main
